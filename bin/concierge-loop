@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Runs a Concierge tick every 2.5 minutes. Meant to be the Opus session's Monitor command.
+set -uo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+# Absolute path: in the Monitor shell `node` can resolve to proto's shim (`proto run node`), and proto 0.58.1
+# printed an NDJSON "AI agent environment" notice to stdout, which became a Monitor event (2026-10-20).
+node="$HOME/.proto/bin/node"
+while true; do
+	"$node" "$here/src/tick.mjs" || echo "ERROR {\"message\":\"tick.mjs exited $? — see ~/concierge/state/loop.err\"}"
+	sleep 150
+done 2>>"$here/state/loop.err"

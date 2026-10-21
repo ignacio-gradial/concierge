@@ -1,0 +1,44 @@
+{
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["events"],
+	"properties": {
+		"events": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": ["key", "source", "pr", "prTitle", "url", "kind", "decision", "summary", "blocking", "nonBlocking", "feedback"],
+				"properties": {
+					"key": { "type": "string" },
+					"source": { "const": "pr" },
+					"pr": { "type": "integer" },
+					"prTitle": { "type": "string" },
+					"url": { "type": "string" },
+					"kind": { "enum": ["review_finished", "review_failed", "approved", "other"] },
+					"decision": { "enum": ["not_important", "needs_attention", "needs_action"] },
+					"summary": { "type": "string" },
+					"blocking": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"required": ["title", "anchor", "explanation"],
+							"properties": { "title": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
+						}
+					},
+					"nonBlocking": { "type": "integer" },
+					"feedback": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"required": ["author", "anchor", "explanation"],
+							"properties": { "author": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
+						}
+					}
+				}
+			}
+		}
+	}
+}

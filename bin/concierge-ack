@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Not the `node` shim: proto can print to stdout, and hook stdout becomes model context. See concierge-loop.
+exec "$HOME/.proto/bin/node" "$(cd "$(dirname "$0")/.." && pwd)/src/ack.mjs"

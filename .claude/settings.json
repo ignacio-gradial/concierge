@@ -1,0 +1,11 @@
+{
+	"enabledMcpjsonServers": ["github"],
+	"permissions": {
+		"allow": ["Bash(/Users/iguridi/concierge/bin/concierge-loop)", "mcp__github"]
+	},
+	"hooks": {
+		"UserPromptSubmit": [
+			{ "hooks": [{ "type": "command", "command": "/Users/iguridi/concierge/bin/concierge-ack", "timeout": 15 }] }
+		]
+	}
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Starts Concierge Bot in the current herdr session: a "Concierge Bot" workspace
+# running Opus 5.5 in ~/concierge, then asks it to start the loop.
+set -euo pipefail
+test "${HERDR_ENV:-}" = 1 || { echo "concierge-up: run this from a pane inside today's herdr session" >&2; exit 1; }
+existing=$(herdr workspace list | jq -r '.result.workspaces[] | select(.label == "Concierge Bot") | .workspace_id')
+if [ -n "$existing" ]; then echo "Concierge Bot already runs in session ${HERDR_SESSION:-?} as $existing" >&2; exit 1; fi
+herdr server reload-config >/dev/null
+pane=$(herdr workspace create --cwd "$HOME/concierge" --label "Concierge Bot" --no-focus | jq -r .result.root_pane.pane_id)
+# The token lives only in the pane's environment; .mcp.json references ${GITHUB_PAT}.
+herdr pane run "$pane" 'export GITHUB_PAT=$(gh auth token)'
+sleep 2
+herdr agent start concierge --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --name "Concierge Bot" >/dev/null
+herdr agent prompt concierge "Start the concierge loop." >/dev/null
+ready=$(herdr tab create --workspace "${pane%%:*}" --cwd "$HOME/concierge" --label Ready --no-focus | jq -r .result.root_pane.pane_id)
+sleep 2
+herdr pane run "$ready" "$HOME/concierge/bin/concierge-ready-view"
+echo "Concierge Bot started in session ${HERDR_SESSION:-?} (pane $pane)"

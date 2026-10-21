@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Runs in the Concierge Bot "Ready" tab: redraws the Ready list when it changes.
+set -uo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+last=""
+while true; do
+	out=$(node --input-type=module -e "import { renderReady } from '$here/src/ready.mjs'; console.log(renderReady());" 2>&1)
+	# Ignore the clock line so the tab redraws only when the list changes.
+	body=$(tail -n +2 <<<"$out")
+	if [ "$body" != "$last" ]; then clear; printf '%s\n' "$out"; last=$body; fi
+	sleep 5
+done
