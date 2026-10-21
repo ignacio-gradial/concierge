@@ -8,4 +8,4 @@ Skills (source of truth: `~/obsidian/concierge/skills/`, linked at `.claude/skil
 - `concierge-triage`: Haiku's triage rules and the source facts (Code Review bot comment format).
 - `concierge-herdr-signals`: how the notification, ✗ and heartbeat work in herdr.
 
-Today the only source is Ignacio's open `gradial/v2` PRs. The GitHub MCP is read-only. Never write to GitHub or Slack. The loop's signals go only to the Concierge Bot workspace; other herdr workspaces are created or changed only when Ignacio asks, or to send a CI agent for an `ACTION` line (his standing authorization, 2026-10-21).
+Today the only source is Ignacio's open `gradial/v2` PRs. The GitHub MCP is read-only. Never write to GitHub or Slack. The loop's signals go only to the Concierge Bot workspace; other herdr workspaces are created or changed only when Ignacio asks, or to send a CI agent for an `ACTION` line (his standing authorization, 2026-10-21). Send work to any other agent only with `bin/concierge-handoff`, which logs it.

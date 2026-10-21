@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Sends work to another herdr agent and logs it: concierge-handoff <agent> <prompt-file> <what>. See concierge-loop.
+exec "$HOME/.proto/bin/node" "$(cd "$(dirname "$0")/.." && pwd)/src/handoff.mjs" "$@"
