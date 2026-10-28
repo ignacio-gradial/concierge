@@ -3,7 +3,7 @@
 // its own; the Opus session runs handoff and close-tab when Ignacio asks.
 //   concierge-act close-workspace <pr>
 //   concierge-act ci-green <pr>
-//   concierge-act handoff <pr> address|discuss <reviewed-sha> (--event <key> [--non-blocking] | --file <path>) [--wait-minutes N]
+//   concierge-act handoff <pr> address|discuss <reviewed-sha> (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--wait-minutes N]
 //   concierge-act close-tab <tab-id>
 // Each prints one result line and logs it. With --report, the result also goes to state/reports.jsonl, so the next
 // tick relays it as a REPORT line.
@@ -186,10 +186,10 @@ const TEMPLATES = {
 	],
 };
 
-// Hands PR feedback to the PR's own agent. It sends nothing when the PR's worktree has moved past the reviewed head
+// Hands PR feedback to the PR's own agent. It sends nothing when the PR's worktree is ahead of or diverged from the reviewed head
 // or has uncommitted changes, or when the agent stays busy past the wait, and says why.
 // --dry-run prints the chosen agent and the prompt and sends nothing.
-export async function handoff(pr, kind, reviewedSha, { findings, waitMinutes = 20, report = false, dryRun = false }) {
+export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinutes = 20, report = false, dryRun = false }) {
 	const what = `#${pr} ${kind} hand-off`;
 	if (!TEMPLATES[kind]) throw new Error(`kind must be address or discuss, not ${kind}`);
 	const info = await prInfo(pr);
@@ -197,14 +197,23 @@ export async function handoff(pr, kind, reviewedSha, { findings, waitMinutes = 2
 	if (!agents.length) return result(what, `#${pr} ${info.title}: sent nothing, no running agent signs it (${ids.join(", ") || "no signature"}).`, report);
 	const agent = agents[0];
 	const worktree = await prWorktree(info.headRefName);
-	if (worktree && !worktree.head.startsWith(reviewedSha)) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} moved past ${reviewedSha} to ${worktree.head.slice(0, 8)}.`, report);
-	if (worktree?.dirty) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} has uncommitted changes at ${reviewedSha}.`, report);
+	// A worktree behind the reviewed head is fine (a bot or another session pushed, such as gradial-gitops restamping a
+	// migration on 2026-10-28); one ahead of it or diverged may already address the feedback.
+	let behind = false;
+	if (worktree && !worktree.head.startsWith(reviewedSha)) {
+		await run("git", ["-C", worktree.dir, "fetch", "--quiet", "origin", info.headRefName], { timeout: 120_000 });
+		behind = await run("git", ["-C", worktree.dir, "merge-base", "--is-ancestor", worktree.head, reviewedSha], { timeout: 30_000 }).then(() => true, () => false);
+		if (!behind) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, ahead of or diverged from the reviewed ${reviewedSha}.`, report);
+	}
+	if (worktree?.dirty) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} has uncommitted changes at ${worktree.head.slice(0, 8)}.`, report);
 	const prompt = [
 		`Concierge Bot hands you ${kind === "address" ? "feedback to address" : "feedback to discuss"} on PR #${pr} (${info.url}), reviewed at ${reviewedSha}. Ignacio asked for this.`,
+		behind ? `Your worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, behind the reviewed ${reviewedSha}: pull origin/${info.headRefName} first.` : "",
 		"Read the full feedback on GitHub first: the Code Review sticky comment, or the teammate's review and its threads.",
 		`The items, verbatim:\n\n${findings}`,
 		TEMPLATES[kind].join("\n"),
-	].join("\n\n");
+		also ? `Also, from Ignacio: ${also}` : "",
+	].filter(Boolean).join("\n\n");
 	if (dryRun) return `dry run · would send to ${where(agent)} · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${prompt}`;
 	if (!IDLE.has(agent.agent_status)) {
 		try {
@@ -243,6 +252,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	const event = flag("--event");
 	const file = flag("--file");
 	const waitMinutes = Number(flag("--wait-minutes") ?? 20);
+	const also = flag("--also");
 	const [command, ...rest] = args;
 	let message;
 	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { report });
@@ -251,7 +261,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		const [pr, kind, sha] = rest;
 		if (!pr || !kind || !sha || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss <reviewed-sha> (--event <key> [--non-blocking] | --file <path>)");
 		const findings = file ? fs.readFileSync(file, "utf8").trim() : findingsFromEvent(event, nonBlocking);
-		message = await handoff(Number(pr), kind, sha, { findings, waitMinutes, report, dryRun });
+		message = await handoff(Number(pr), kind, sha, { findings, also, waitMinutes, report, dryRun });
 	} else if (command === "close-tab") message = await closeTab(rest[0], { report });
 	else throw new Error("usage: concierge-act close-workspace|ci-green|handoff|close-tab …");
 	console.log(message);
