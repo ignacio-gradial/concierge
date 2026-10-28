@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Concierge's herdr actions as deterministic commands: concierge-act close-workspace|ci-green|handoff|close-tab …
+# See src/act.mjs and the concierge-actions skill.
+exec "$HOME/.proto/bin/node" "$(cd "$(dirname "$0")/.." && pwd)/src/act.mjs" "$@"

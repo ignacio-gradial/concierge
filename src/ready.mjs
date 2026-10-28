@@ -1,5 +1,5 @@
-// The Ready list: open PRs whose latest Code Review has no Blocking findings
-// and that have no review request yet, so Ignacio can ask for review now.
+// The Ready list: open PRs whose latest Code Review has no Blocking findings, so Ignacio can ask for review now.
+// GitHub's review requests don't count: CODEOWNERS adds team requests on its own (Ignacio, 2026-10-22).
 // Shown as ✓N in the sidebar and listed in the Concierge Bot "Ready" tab.
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,8 @@ import { appendLog, pacific, readJson, setReady, writeJsonAtomic } from "./signa
 export const READY_FILE = path.join(os.homedir(), "concierge/state/ready.json");
 // Who approved each PR, from the feed's review events: the board has no review state. { "<pr>": { "<login>": { at, commit } } }
 export const APPROVALS_FILE = path.join(os.homedir(), "concierge/state/approvals.json");
+// Ignacio's cap on each PR's line in the Ready tab (20 words on 2026-10-21, 7 on 2026-10-27). Haiku writes to it; going over is logged, not cut.
+const ASK_WORDS = 7;
 
 // Keeps each reviewer's latest stance, as GitHub does: an approval adds them, their later changes-requested review or
 // a dismissal removes them, and a close drops the PR.
@@ -37,7 +39,6 @@ function leaveReason(entry, pr, change) {
 	// The board lists only PRs updated in its 30-day window, so a missing PR may just be idle: closes come from the feed.
 	if (!pr) return undefined;
 	if (pr.headSha !== entry.head) return "new push";
-	if (pr.reviewRequests.length) return "review requested";
 	return undefined;
 }
 
@@ -58,7 +59,10 @@ export async function updateReady(events, board, activity) {
 			}
 			// The head is the board's now, not the review's: a push in the gap is caught when its own review finishes.
 			if (!ready.has(event.pr)) appendLog(`ready + #${event.pr} · clean review`);
-			ready.set(event.pr, { pr: event.pr, title: event.prTitle, url: event.url.replace(/#.*$/, ""), nonBlocking: event.nonBlocking, cleanAt: event.key.split(":review:")[1], head: pr.headSha });
+			if (!event.ask?.line) appendLog(`ready · #${event.pr} clean review without an ask line from Haiku, listed by title`);
+			const words = event.ask?.line.split(/\s+/).filter(Boolean).length ?? 0;
+			if (words > ASK_WORDS) appendLog(`**ready · #${event.pr} ask line has ${words} words, over the ${ASK_WORDS}-word cap**`);
+			ready.set(event.pr, { pr: event.pr, title: event.prTitle, url: event.url.replace(/#.*$/, ""), nonBlocking: event.nonBlocking.length, cleanAt: event.key.split(":review:")[1], head: pr.headSha, ask: event.ask });
 		} else if ((event.kind === "review_finished" || event.kind === "review_failed") && ready.delete(event.pr)) {
 			appendLog(`ready − #${event.pr} · ${event.kind === "review_failed" ? "review failed" : "blocking findings"}`);
 		}
@@ -71,23 +75,47 @@ export async function updateReady(events, board, activity) {
 			appendLog(`ready − #${entry.pr} · ${reason}`);
 		} else if (pr) {
 			entry.isDraft = pr.isDraft;
+			entry.stackedOn = pr.stackedOn;
 		}
 		entry.approvedBy = Object.keys(approvals[entry.pr] ?? {});
 	}
 	const list = [...ready.values()];
 	writeJsonAtomic(READY_FILE, list);
-	await setReady(list.length);
+	await setReady(shownReady(list).length);
 }
 
-export function renderReady(list = readJson(READY_FILE, [])) {
-	const now = pacific();
-	const lines = [`Ready for review · ${list.length} · updated ${now.time} PT`, ""];
-	if (!list.length) lines.push("Nothing to ask review for.");
-	for (const e of list) {
-		const at = pacific(new Date(e.cleanAt));
-		const when = at.day === now.day ? at.time.slice(0, 5) : `${at.day} ${at.time.slice(0, 5)}`;
-		const approved = e.approvedBy?.length ? ` · approved by ${e.approvedBy.join(", ")}` : "";
-		lines.push(`#${e.pr}  ${e.approvedBy?.length ? "✅ " : ""}${e.title}`, `        clean since ${when} PT · ${e.nonBlocking} non-blocking${e.isDraft ? " · draft" : ""}${approved}`, `        ${e.url}`, "");
+// A clean PR stacked on one that isn't on the list is held back (Ignacio, 2026-10-22), also down a chain of stacked
+// PRs. It stays in ready.json, so it shows again as soon as its parent is ready.
+function shownReady(list) {
+	let shown = list;
+	for (;;) {
+		const listed = new Set(shown.map((e) => e.pr));
+		const next = shown.filter((e) => !e.stackedOn || listed.has(e.stackedOn));
+		if (next.length === shown.length) return shown;
+		shown = next;
 	}
-	return lines.join("\n");
+}
+
+// Stef's review-ask style, so everything under the first line pastes into Slack as is: an area line, then one line
+// per PR saying what it changes and why, its size, and its link. Haiku writes `ask` when the review comes back clean.
+export function renderReady(all = readJson(READY_FILE, [])) {
+	const now = pacific();
+	const list = shownReady(all);
+	const held = all.filter((e) => !list.includes(e)).map((e) => `#${e.pr} on #${e.stackedOn}`);
+	const lines = [`Ready for review · ${list.length}${held.length ? ` · held back, stacked on a PR that isn't ready: ${held.join(", ")}` : ""} · updated ${now.time} PT`, ""];
+	if (!list.length) lines.push("Nothing to ask review for.");
+	const areas = new Map();
+	for (const e of list) {
+		const area = e.ask?.line ? e.ask.area : "no ask line from haiku";
+		areas.set(area, [...(areas.get(area) ?? []), e]);
+	}
+	for (const [area, entries] of areas) {
+		lines.push(area, "");
+		for (const e of entries) {
+			const notes = [e.ask?.size, e.stackedOn && `stacked on #${e.stackedOn}`, e.isDraft && "draft", e.approvedBy?.length && `approved by ${e.approvedBy.join(", ")}`].filter(Boolean);
+			lines.push(`- ${e.approvedBy?.length ? "✅ " : ""}${e.ask?.line || e.title}${notes.length ? ` (${notes.join(", ")})` : ""} ${e.url}`);
+		}
+		lines.push("", "");
+	}
+	return lines.join("\n").trimEnd();
 }

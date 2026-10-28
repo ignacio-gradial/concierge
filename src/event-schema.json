@@ -8,14 +8,14 @@
 			"items": {
 				"type": "object",
 				"additionalProperties": false,
-				"required": ["key", "source", "pr", "prTitle", "url", "kind", "decision", "summary", "blocking", "nonBlocking", "feedback"],
+				"required": ["key", "source", "pr", "prTitle", "url", "kind", "decision", "summary", "blocking", "nonBlocking", "feedback", "ask"],
 				"properties": {
 					"key": { "type": "string" },
 					"source": { "const": "pr" },
 					"pr": { "type": "integer" },
 					"prTitle": { "type": "string" },
 					"url": { "type": "string" },
-					"kind": { "enum": ["review_finished", "review_failed", "approved", "other"] },
+					"kind": { "enum": ["review_finished", "review_failed", "approved", "teammate_review", "dequeued", "merged", "other"] },
 					"decision": { "enum": ["not_important", "needs_attention", "needs_action"] },
 					"summary": { "type": "string" },
 					"blocking": {
@@ -27,7 +27,15 @@
 							"properties": { "title": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
 						}
 					},
-					"nonBlocking": { "type": "integer" },
+					"nonBlocking": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"required": ["title", "anchor", "explanation"],
+							"properties": { "title": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
+						}
+					},
 					"feedback": {
 						"type": "array",
 						"items": {
@@ -36,6 +44,12 @@
 							"required": ["author", "anchor", "explanation"],
 							"properties": { "author": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
 						}
+					},
+					"ask": {
+						"type": "object",
+						"additionalProperties": false,
+						"required": ["area", "line", "size"],
+						"properties": { "area": { "type": "string" }, "line": { "type": "string" }, "size": { "type": "string" } }
 					}
 				}
 			}

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Herdr reports a finished instruction: concierge-report <what> <message-file>. See concierge-actions.
+exec "$HOME/.proto/bin/node" "$(cd "$(dirname "$0")/.." && pwd)/src/report.mjs" "$@"

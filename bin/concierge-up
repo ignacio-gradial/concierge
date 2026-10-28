@@ -15,4 +15,8 @@ herdr agent prompt concierge "Start the concierge loop." >/dev/null
 ready=$(herdr tab create --workspace "${pane%%:*}" --cwd "$HOME/concierge" --label Ready --no-focus | jq -r .result.root_pane.pane_id)
 sleep 2
 herdr pane run "$ready" "$HOME/concierge/bin/concierge-ready-view"
+# Merge Queue: investigates why a PR left the merge queue. See the concierge-merge-queue skill.
+mq_pane=$(herdr tab create --workspace "${pane%%:*}" --cwd "$HOME/concierge-merge-queue" --label "Merge Queue" --no-focus | jq -r .result.root_pane.pane_id)
+sleep 2
+herdr agent start merge-queue --kind claude --pane "$mq_pane" --timeout 60000 -- --model claude-opus-5-5 --name "Merge Queue" >/dev/null
 echo "Concierge Bot started in session ${HERDR_SESSION:-?} (pane $pane)"
