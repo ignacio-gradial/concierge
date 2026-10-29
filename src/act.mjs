@@ -3,8 +3,9 @@
 // its own; the Opus session runs handoff and close-tab when Ignacio asks.
 //   concierge-act close-workspace <pr>
 //   concierge-act ci-green <pr>
-//   concierge-act handoff <pr> address|discuss <reviewed-sha> (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--wait-minutes N]
+//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--wait-minutes N]
 //   concierge-act close-tab <tab-id>
+//   concierge-act find-agent <pr>
 // Each prints one result line and logs it. With --report, the result also goes to state/reports.jsonl, so the next
 // tick relays it as a REPORT line.
 import { execFile } from "node:child_process";
@@ -14,6 +15,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { sendPrompt } from "./handoff.mjs";
+import { haiku } from "./haiku.mjs";
 import { appendLog } from "./signals.mjs";
 
 const run = promisify(execFile);
@@ -70,17 +72,64 @@ export function signatures(body) {
 }
 
 const signs = (agent, ids) => ids.some((id) => String(agent.agent_session?.value ?? "").toLowerCase().includes(id));
-const where = (agent) => (agent.name ? `${agent.name} (${agent.session} ${agent.pane_id}, ${agent.agent_status})` : `${agent.pane_id} (${agent.session}, ${agent.agent_status})`);
+const where = (agent) => `"${agent.workspace}" / tab ${agent.tab} (${agent.name ?? agent.pane_id}, ${agent.session}, ${agent.agent_status})`;
 
 async function prInfo(pr) {
-	return gh(["pr", "view", String(pr), "--json", "number,title,body,headRefName,headRefOid,state,url"]);
+	return gh(["pr", "view", String(pr), "--json", "number,title,body,headRefName,baseRefName,headRefOid,state,url"]);
 }
 
-// The PR's agents, Concierge's session first, then idle before busy.
-async function prAgents(info) {
+// Every running agent with where it sits and what its tab shows, minus Concierge's own: its workspace and the
+// sessions working in ~/concierge*.
+async function candidates() {
+	const found = [];
+	for (const { session, socket } of await sessions()) {
+		const [{ agents }, { workspaces }, { tabs }, { panes }] = await Promise.all(["agent", "workspace", "tab", "pane"].map((kind) => herdr(socket, [kind, "list"])));
+		for (const agent of agents) {
+			if ((socket === CONCIERGE_SOCKET && agent.workspace_id === CONCIERGE_WORKSPACE) || (agent.cwd ?? "").startsWith(path.join(HOME, "concierge"))) continue;
+			const { stdout } = await run("herdr", ["pane", "read", agent.pane_id, "--source", "recent", "--lines", "60"], { timeout: 10_000, env: { ...process.env, HERDR_SOCKET_PATH: socket } });
+			found.push({
+				...agent,
+				session,
+				socket,
+				id: `${session}/${agent.pane_id}`,
+				workspace: workspaces.find((w) => w.workspace_id === agent.workspace_id)?.label,
+				tab: tabs.find((t) => t.tab_id === agent.tab_id)?.label,
+				title: panes.find((p) => p.pane_id === agent.pane_id)?.terminal_title_stripped ?? "",
+				screen: stdout.split("\n").filter((l) => l.trim()).slice(-30).map((l) => l.slice(0, 200)).join("\n"),
+			});
+		}
+	}
+	return found;
+}
+
+// The PR's agent is the one whose tab works on the PR, read from where it sits and what its tab shows, not from the
+// session that signed the PR: sessions end and their work moves to other tabs (Ignacio, 2026-10-28). Haiku picks it.
+// `openPrs` are Ignacio's other open PRs, for close-workspace to learn which of them the chosen workspace also serves.
+export async function prAgent(info, { openPrs = [] } = {}) {
 	const ids = signatures(info.body);
-	const agents = (await allAgents()).filter((a) => signs(a, ids) && a.workspace_id !== CONCIERGE_WORKSPACE);
-	return { ids, agents: agents.sort((a, b) => (b.socket === CONCIERGE_SOCKET) - (a.socket === CONCIERGE_SOCKET) || IDLE.has(b.agent_status) - IDLE.has(a.agent_status)) };
+	const found = await candidates();
+	if (!found.length) return { agent: null, reason: "no agent runs in any herdr session", alsoServes: [] };
+	const shown = found.map((a) => ({ id: a.id, workspace: a.workspace, tab: a.tab, title: a.title, agent: a.agent_session?.agent, status: a.agent_status, signsPr: signs(a, ids), screen: a.screen }));
+	const prompt = [
+		`Which herdr pane's agent is working on gradial/v2 PR #${info.number} "${info.title}"? Its branch is ${info.headRefName}, based on ${info.baseRefName}.`,
+		"A pane is the PR's when its terminal title, tab or workspace label, or recent screen shows it working on this PR: its number, its branch or worktree, or this PR's change. Concierge hands that agent the PR's review feedback or CI fixes, so among several prefer the one that writes the PR's code over one that only reviews or explains it.",
+		"Not the PR's: a pane that only mentions the PR while working on something else, or one working on another PR in the same area, including the PR this one is stacked on. Name the closest such pane in `reason`.",
+		"`signsPr` means the agent's session id is in the PR description, so it wrote the PR at some point. It is a hint; the pane's current work decides.",
+		"Answer `pane` with one candidate's `id`, or none when no pane is the PR's. `reason` is one sentence of evidence from the candidates. `alsoServes` lists the numbers from Other open PRs that any pane in the chosen pane's workspace works on, [] when none or when `pane` is none.",
+		`Candidates:\n${JSON.stringify(shown)}`,
+		`Other open PRs: ${openPrs.length ? JSON.stringify(openPrs.map((p) => ({ number: p.number, title: p.title, branch: p.headRefName }))) : "none"}`,
+	].join("\n\n");
+	const schema = {
+		type: "object",
+		additionalProperties: false,
+		required: ["pane", "reason", "alsoServes"],
+		properties: { pane: { enum: [...found.map((a) => a.id), "none"] }, reason: { type: "string" }, alsoServes: { type: "array", items: { type: "integer" } } },
+	};
+	const { structured_output: pick } = await haiku(prompt, schema, { args: ["--tools", "", "--strict-mcp-config"], timeout: 120_000 });
+	if (pick.pane === "none") return { agent: null, reason: pick.reason, alsoServes: [] };
+	const agent = found.find((a) => a.id === pick.pane);
+	if (!agent) throw new Error(`Haiku picked ${pick.pane}, which is not a running agent: ${pick.reason}`);
+	return { agent, reason: pick.reason, alsoServes: pick.alsoServes.filter((n) => openPrs.some((p) => p.number === n)) };
 }
 
 export const fileReport = (what, message) => result(what, message, true);
@@ -91,46 +140,42 @@ function result(what, message, report) {
 	return message;
 }
 
-// A merged PR's workspace closes only when every agent in it is idle and none of them signs another open PR of
-// Ignacio's; one workspace often serves a stack. Agent sessions and worktrees stay on disk.
+// A merged PR's workspace closes only when every agent in it is idle and it works on no other open PR of Ignacio's;
+// one workspace often serves a stack. Agent sessions and worktrees stay on disk.
 export async function closeWorkspace(pr, { report = false } = {}) {
 	const what = `#${pr} close_workspace`;
 	const info = await prInfo(pr);
-	const { ids, agents } = await prAgents(info);
-	if (!ids.length) return result(what, `#${pr} ${info.title}: no session signature in the PR description. Closed nothing.`, report);
-	if (!agents.length) return result(what, `#${pr} ${info.title}: no running agent signs it (${ids.join(", ")}). Closed nothing.`, report);
-	const open = (await gh(["pr", "list", "--author", "ignacio-gradial", "--state", "open", "--limit", "200", "--json", "number,body"])).filter((p) => p.number !== pr);
-	const everyone = await allAgents();
-	const lines = [];
-	for (const key of new Set(agents.map((a) => `${a.socket}\n${a.workspace_id}`))) {
-		const [socket, workspaceId] = key.split("\n");
-		const members = everyone.filter((a) => a.socket === socket && a.workspace_id === workspaceId);
-		const { workspace } = await herdr(socket, ["workspace", "get", workspaceId]);
-		const label = `"${workspace.label}" (${workspaceId}, ${path.basename(path.dirname(socket))})`;
-		const busy = members.filter((a) => !IDLE.has(a.agent_status));
-		const stillUsed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => `#${p.number}`);
-		if (busy.length) lines.push(`Left ${label} open: ${busy.map(where).join(", ")} still working.`);
-		else if (stillUsed.length) lines.push(`Left ${label} open: its agents also sign open ${stillUsed.join(", ")}.`);
-		else {
-			await herdr(socket, ["workspace", "close", workspaceId]);
-			lines.push(`Closed ${label}: ${members.length} idle agent${members.length === 1 ? "" : "s"}, none signing another open PR.`);
-		}
+	const open = (await gh(["pr", "list", "--author", "ignacio-gradial", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,body"])).filter((p) => p.number !== pr);
+	const { agent, reason, alsoServes } = await prAgent(info, { openPrs: open });
+	if (!agent) return result(what, `#${pr} ${info.title}: no running agent works on it (${reason}). Closed nothing.`, report);
+	const members = (await allAgents()).filter((a) => a.socket === agent.socket && a.workspace_id === agent.workspace_id);
+	const label = `"${agent.workspace}" (${agent.workspace_id}, ${agent.session})`;
+	const busy = members.filter((a) => !IDLE.has(a.agent_status));
+	// Signatures still count here: a workspace stays open when its agents signed another open PR.
+	const signed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => p.number);
+	const stillUsed = [...new Set([...alsoServes, ...signed])].map((n) => `#${n}`);
+	let line;
+	if (busy.length) line = `Left ${label} open: ${busy.map((a) => a.name ?? a.pane_id).join(", ")} still working.`;
+	else if (stillUsed.length) line = `Left ${label} open: it also works on open ${stillUsed.join(", ")}.`;
+	else {
+		await herdr(agent.socket, ["workspace", "close", agent.workspace_id]);
+		line = `Closed ${label}: ${members.length} idle agent${members.length === 1 ? "" : "s"}, no other open PR.`;
 	}
-	return result(what, `#${pr} ${info.title} merged. ${lines.join(" ")} Agent sessions and worktrees stay on disk.`, report);
+	return result(what, `#${pr} ${info.title} merged. Its agent: ${where(agent)}, because ${reason} ${line} Agent sessions and worktrees stay on disk.`, report);
 }
 
 // An approval with no feedback while CI is failing: a new Claude agent in the PR's workspace, or in a new workspace
-// when no running agent signs the PR, makes CI green.
+// when no running agent works on the PR, makes CI green.
 export async function ciGreen(pr, { ci = null, report = false } = {}) {
 	const what = `#${pr} ci_green`;
 	const info = await prInfo(pr);
-	const { agents } = await prAgents(info);
+	const { agent } = await prAgent(info);
 	const name = `ci-${pr}`;
 	let socket = CONCIERGE_SOCKET;
 	let pane;
-	if (agents.length) {
-		socket = agents[0].socket;
-		pane = (await herdr(socket, ["tab", "create", "--workspace", agents[0].workspace_id, "--cwd", REPO, "--label", `CI #${pr}`, "--no-focus"])).root_pane.pane_id;
+	if (agent) {
+		socket = agent.socket;
+		pane = (await herdr(socket, ["tab", "create", "--workspace", agent.workspace_id, "--cwd", REPO, "--label", `CI #${pr}`, "--no-focus"])).root_pane.pane_id;
 	} else {
 		pane = (await herdr(socket, ["workspace", "create", "--cwd", REPO, "--label", `#${pr} CI`, "--no-focus"])).root_pane.pane_id;
 	}
@@ -148,7 +193,8 @@ export async function ciGreen(pr, { ci = null, report = false } = {}) {
 	return result(what, `#${pr} ${info.title}: started CI agent ${name}. ${line.replace(/^handoff · /, "")}`, report);
 }
 
-function findingsFromEvent(key, nonBlocking) {
+// The items and the reviewed commit of the event with `key` in the queue.
+function fromEvent(key, nonBlocking) {
 	const line = fs.readFileSync(EVENTS_FILE, "utf8").split("\n").filter((l) => l.includes(`"key":"${key}"`)).at(-1);
 	if (!line) throw new Error(`no event with key ${key} in ${EVENTS_FILE}`);
 	const event = JSON.parse(line);
@@ -158,7 +204,7 @@ function findingsFromEvent(key, nonBlocking) {
 		...event.feedback.map((f) => `${f.author}, ${f.anchor}\n${f.explanation}`),
 	];
 	if (!items.length) throw new Error(`event ${key} has no items to hand off`);
-	return items.map((item, i) => `${i + 1}. ${item}`).join("\n\n");
+	return { findings: items.map((item, i) => `${i + 1}. ${item}`).join("\n\n"), commit: event.commit };
 }
 
 async function prWorktree(branch) {
@@ -193,9 +239,8 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinut
 	const what = `#${pr} ${kind} hand-off`;
 	if (!TEMPLATES[kind]) throw new Error(`kind must be address or discuss, not ${kind}`);
 	const info = await prInfo(pr);
-	const { ids, agents } = await prAgents(info);
-	if (!agents.length) return result(what, `#${pr} ${info.title}: sent nothing, no running agent signs it (${ids.join(", ") || "no signature"}).`, report);
-	const agent = agents[0];
+	const { agent, reason } = await prAgent(info);
+	if (!agent) return result(what, `#${pr} ${info.title}: sent nothing, no running agent works on it (${reason}).`, report);
 	const worktree = await prWorktree(info.headRefName);
 	// A worktree behind the reviewed head is fine (a bot or another session pushed, such as gradial-gitops restamping a
 	// migration on 2026-10-28); one ahead of it or diverged may already address the feedback.
@@ -214,7 +259,7 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinut
 		TEMPLATES[kind].join("\n"),
 		also ? `Also, from Ignacio: ${also}` : "",
 	].filter(Boolean).join("\n\n");
-	if (dryRun) return `dry run · would send to ${where(agent)} · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${prompt}`;
+	if (dryRun) return `dry run · would send to ${where(agent)}, because ${reason} · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${prompt}`;
 	if (!IDLE.has(agent.agent_status)) {
 		try {
 			await herdr(agent.socket, ["agent", "wait", agent.pane_id, "--until", "idle", "--until", "done", "--timeout", String(waitMinutes * 60_000)], waitMinutes * 60_000 + 30_000);
@@ -223,7 +268,7 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinut
 		}
 	}
 	const line = await sendPrompt({ agent: agent.pane_id, prompt, what: `#${pr} ${kind}`, socket: agent.socket });
-	return result(what, `#${pr} ${info.title}: sent. ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: sent to ${where(agent)}, because ${reason} ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
@@ -258,11 +303,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { report });
 	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { report });
 	else if (command === "handoff") {
-		const [pr, kind, sha] = rest;
-		if (!pr || !kind || !sha || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss <reviewed-sha> (--event <key> [--non-blocking] | --file <path>)");
-		const findings = file ? fs.readFileSync(file, "utf8").trim() : findingsFromEvent(event, nonBlocking);
+		const [pr, kind, typed] = rest;
+		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
+		const { findings, commit } = file ? { findings: fs.readFileSync(file, "utf8").trim() } : fromEvent(event, nonBlocking);
+		if (typed && commit && !commit.startsWith(typed)) throw new Error(`reviewed sha ${typed} is not event ${event}'s commit ${commit}`);
+		const sha = commit || typed;
+		if (!sha) throw new Error(file ? "--file needs the reviewed sha" : `event ${event} has no commit (queued before 2026-10-29?): pass the reviewed sha`);
 		message = await handoff(Number(pr), kind, sha, { findings, also, waitMinutes, report, dryRun });
 	} else if (command === "close-tab") message = await closeTab(rest[0], { report });
-	else throw new Error("usage: concierge-act close-workspace|ci-green|handoff|close-tab …");
+	else if (command === "find-agent") {
+		const { agent, reason } = await prAgent(await prInfo(Number(rest[0])));
+		message = `#${rest[0]}: ${agent ? where(agent) : "no running agent works on it"}, because ${reason}`;
+	} else throw new Error("usage: concierge-act close-workspace|ci-green|handoff|close-tab|find-agent …");
 	console.log(message);
 }

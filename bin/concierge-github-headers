@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# headersHelper for the GitHub MCP in .mcp.json: Claude Code runs it at connect time, so the token comes from gh
+# whenever the session starts. ${GITHUB_PAT} lived only in the pane that concierge-up set up, and a session started
+# anywhere else sent "Bearer " and failed (2026-10-27).
+set -euo pipefail
+token=$(gh auth token)
+printf '{"Authorization":"Bearer %s"}\n' "$token"

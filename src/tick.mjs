@@ -2,13 +2,11 @@
 // the cursor, Haiku triages it (reading a finished review through the GitHub
 // MCP), and the runner dedups by event key, queues and logs every event, and
 // raises the herdr notification + ✗ for needs_attention.
-// stdout carries only EVENT / ERROR lines: the Opus loop's Monitor turns each
-// into a message.
-import { execFile } from "node:child_process";
+// stdout carries only EVENT / ACTION / REPORT / ERROR / RECOVERED messages (src/monitor-lines.mjs): the Opus
+// loop's Monitor turns each into a message.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
 	ACK_FILE,
 	alertActive,
@@ -25,8 +23,9 @@ import { forgeBoard, forgeEvents, myActivity, trackMergeGroups, trackMergeQueue 
 import { READY_FILE, updateReady } from "./ready.mjs";
 import { ciGreen, closeWorkspace, fileReport } from "./act.mjs";
 import { sendPrompt } from "./handoff.mjs";
+import { haiku } from "./haiku.mjs";
+import { eventMessage, message } from "./monitor-lines.mjs";
 
-const run = promisify(execFile);
 const HOME = path.join(os.homedir(), "concierge");
 const QUEUE_FILE = path.join(HOME, "state/events.jsonl");
 // gx advances its cursor file as soon as it prints a batch. It works on the copy, and the tick commits the copy
@@ -34,66 +33,26 @@ const QUEUE_FILE = path.join(HOME, "state/events.jsonl");
 const FORGE_CURSOR = path.join(HOME, "state/forge.cursor");
 const FORGE_CURSOR_NEXT = `${FORGE_CURSOR}.next`;
 const SKILL_FILE = path.join(os.homedir(), "obsidian/concierge/skills/concierge-triage/SKILL.md");
-const MODEL = "claude-haiku-5-5";
-// Absolute path: the Monitor shell can resolve /opt/homebrew/bin/claude (2.1.220), which predates
-// Haiku 5.5 and runs it with fallback limits and prices (200k context, ~40x reported cost).
-const CLAUDE = path.join(os.homedir(), ".local/bin/claude");
-const HAIKU_CWD = path.join(os.tmpdir(), "concierge-haiku");
 const SEEN_LIMIT = 1000;
 // Herdr's reports (bin/concierge-report), and how much of that file the Opus session has been sent.
 const REPORTS_FILE = path.join(HOME, "state/reports.jsonl");
 const REPORTS_OFFSET = path.join(HOME, "state/reports.offset");
 
-const emit = (kind, payload) => process.stdout.write(`${kind} ${JSON.stringify(payload)}\n`);
-
-// claude -p exits non-zero on its own errors but still prints the JSON result;
-// keep that result as the error instead of the bare "Command failed" line.
-async function claudeJson(args, options) {
-	const pending = run(CLAUDE, args, options);
-	pending.child.stdin.end();
-	try {
-		return (await pending).stdout;
-	} catch (error) {
-		const result = error.stdout ? JSON.parse(error.stdout) : undefined;
-		const detail = result ? `${result.subtype ?? "error"}: ${result.result ?? JSON.stringify(result.errors ?? result)}` : error.stderr || error.message;
-		throw new Error(`claude -p exited ${error.code ?? error.signal}: ${String(detail).slice(0, 400)}`);
-	}
-}
+const emit = (text) => process.stdout.write(text);
+// Kinds whose `commit` is the reviewed head, which `concierge-act handoff --event` hands to the PR's agent.
+const REVIEWED = new Set(["review_finished", "review_failed", "approved", "teammate_review"]);
 
 async function triage(activity) {
 	const areas = [...new Set(readJson(READY_FILE, []).map((e) => e.ask?.area).filter(Boolean))];
-	const stdout = await claudeJson(
-		[
-			"-p",
-			`Run one Concierge tick on this Forge activity:\n${JSON.stringify(activity)}\n\nAreas already on the Ready list: ${areas.length ? areas.join("; ") : "none"}`,
-			"--model",
-			MODEL,
-			"--mcp-config",
-			path.join(HOME, ".mcp.json"),
-			"--strict-mcp-config",
-			"--append-system-prompt-file",
-			SKILL_FILE,
-			"--json-schema",
-			fs.readFileSync(path.join(HOME, "src/event-schema.json"), "utf8"),
-			"--output-format",
-			"json",
-			"--allowedTools=mcp__github",
-		],
-		// A cwd outside ~/concierge keeps Haiku from loading this project's hooks, CLAUDE.md and skills.
-		{ cwd: HAIKU_CWD, timeout: 240_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GITHUB_PAT: await githubToken() } },
+	const result = await haiku(
+		`Run one Concierge tick on this Forge activity:\n${JSON.stringify(activity)}\n\nAreas already on the Ready list: ${areas.length ? areas.join("; ") : "none"}`,
+		JSON.parse(fs.readFileSync(path.join(HOME, "src/event-schema.json"), "utf8")),
+		// The MCP's token comes from bin/concierge-github-headers, its headersHelper.
+		{ args: ["--mcp-config", path.join(HOME, ".mcp.json"), "--strict-mcp-config", "--append-system-prompt-file", SKILL_FILE, "--allowedTools=mcp__github"] },
 	);
-	const result = JSON.parse(stdout);
-	if (result.is_error || !result.structured_output) {
-		throw new Error(`Haiku tick failed: ${result.subtype ?? ""} ${String(result.result ?? stdout).slice(0, 300)}`);
-	}
 	const models = Object.keys(result.modelUsage ?? {}).join("+");
 	fs.appendFileSync(path.join(HOME, "state/usage.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), session: result.session_id, cost: result.total_cost_usd, usage: result.modelUsage, speed: result.usage?.speed, tier: result.usage?.service_tier })}\n`);
 	return { events: result.structured_output.events, cost: result.total_cost_usd, turns: result.num_turns, models };
-}
-
-async function githubToken() {
-	const { stdout } = await run("gh", ["auth", "token"], { timeout: 10_000 });
-	return stdout.trim();
 }
 
 function logEvent(event) {
@@ -117,6 +76,18 @@ function notificationBody(event) {
 	if (event.kind === "approved" || event.kind === "teammate_review") return `${event.feedback.length} feedback items`;
 	if (event.kind !== "review_finished") return event.summary.slice(0, 120);
 	return `${event.blocking.length} blocking, ${event.nonBlocking.length} non-blocking`;
+}
+
+// Haiku copies `commit` from the PR's Forge events. One that isn't among them is cleared, so a hand-off never gets a
+// commit nobody reviewed.
+function checkCommit(event, activity) {
+	const forge = activity.find((a) => a.pr === event.pr)?.forge ?? [];
+	const known = new Set(forge.flatMap((e) => [e.headSha, e.review?.commitId]).filter(Boolean));
+	if (event.commit && !known.has(event.commit)) {
+		appendLog(`**event commit not in Forge's events, cleared** · #${event.pr} ${event.kind} · ${event.commit} · key ${event.key}`);
+		event.commit = "";
+	}
+	if (!event.commit && REVIEWED.has(event.kind)) appendLog(`**event without a reviewed commit** · #${event.pr} ${event.kind} · key ${event.key}`);
 }
 
 // The actions, carried out here by src/act.mjs since 2026-10-28 (Ignacio): a merged PR's herdr workspace gets closed,
@@ -143,7 +114,7 @@ async function act(event, board, activity, next) {
 				await sendPrompt({ agent: "merge-queue", prompt, what: `#${event.pr} investigate_dequeue` });
 			} catch (error) {
 				// The Opus session forwards it by hand.
-				emit("ACTION", action);
+				emit(`ACTION ${JSON.stringify(action)}\n`);
 				throw error;
 			}
 			return;
@@ -192,7 +163,10 @@ function relayReports() {
 	if (!fs.existsSync(REPORTS_FILE)) return;
 	const reports = fs.readFileSync(REPORTS_FILE, "utf8");
 	const offset = Number(fs.existsSync(REPORTS_OFFSET) ? fs.readFileSync(REPORTS_OFFSET, "utf8") : 0);
-	for (const line of reports.slice(offset).split("\n").filter(Boolean)) emit("REPORT", JSON.parse(line));
+	for (const line of reports.slice(offset).split("\n").filter(Boolean)) {
+		const report = JSON.parse(line);
+		emit(message("REPORT", report.what, report.message.split("\n").filter((l) => l.trim()).map((l) => `  ${l}`)));
+	}
 	fs.writeFileSync(REPORTS_OFFSET, String(reports.length));
 }
 
@@ -219,7 +193,6 @@ async function main() {
 		const groups = trackMergeGroups(feed, board);
 		const activity = myActivity(feed, board);
 		const mergeQueue = trackMergeQueue(board, activity, groups);
-		fs.mkdirSync(HAIKU_CWD, { recursive: true });
 		const { events, cost, turns, models } = activity.length ? await triage(activity) : { events: [], cost: 0, turns: 0, models: "no triage" };
 		const seen = new Set(state.seen);
 		const fresh = events.filter((e) => !seen.has(e.key));
@@ -227,13 +200,14 @@ async function main() {
 		// Before any notification: if this fails, the next tick retries these events without re-notifying.
 		await updateReady(fresh, board, activity);
 		for (const event of fresh) {
+			checkCommit(event, activity);
 			fs.appendFileSync(QUEUE_FILE, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 			logEvent(event);
 			if (event.decision === "needs_attention") {
 				const sound = event.blocking.length || event.feedback.length ? "request" : "done";
 				await notify(notificationTitle(event), notificationBody(event), sound);
 				next.lastAttentionAt = new Date().toISOString();
-				emit("EVENT", event);
+				emit(eventMessage(event));
 			} else if (event.decision === "needs_action") {
 				await act(event, board, activity, next);
 			}
@@ -242,7 +216,7 @@ async function main() {
 		next.seen = [...state.seen, ...fresh.map((e) => e.key)].slice(-SEEN_LIMIT);
 		if (state.failing) {
 			appendLog("recovered · tick succeeded again");
-			emit("RECOVERED", { message: "tick succeeded again" });
+			emit(message("RECOVERED", "tick succeeded again"));
 		}
 		if (fs.existsSync(FORGE_CURSOR_NEXT)) fs.renameSync(FORGE_CURSOR_NEXT, FORGE_CURSOR);
 		mergeQueue.commit();
@@ -251,13 +225,13 @@ async function main() {
 		const seconds = ((Date.now() - started.getTime()) / 1000).toFixed(1);
 		appendLog(`tick · forge ${feed.length} events, ${activity.length} PRs of mine · ${events.length} events (${fresh.length} new) · ${turns} turns · ${models} · $${cost.toFixed(4)} · ${seconds}s`);
 	} catch (error) {
-		const message = String(error?.stderr || error?.message || error).trim().slice(0, 500);
-		appendLog(`**tick failed** · ${message}`);
+		const detail = String(error?.stderr || error?.message || error).trim().slice(0, 500);
+		appendLog(`**tick failed** · ${detail}`);
 		// Loud once per outage; the cursor stays put so the next success covers the gap.
 		if (!state.failing) {
 			writeJsonAtomic(STATE_FILE, { ...state, failing: true, lastAttentionAt: new Date().toISOString() });
-			emit("ERROR", { message });
-			await notify("Concierge error", message.slice(0, 120), "request");
+			emit(message("ERROR", detail));
+			await notify("Concierge error", detail.slice(0, 120), "request");
 			await setAlert(true);
 		}
 	}

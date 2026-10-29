@@ -8,7 +8,7 @@
 			"items": {
 				"type": "object",
 				"additionalProperties": false,
-				"required": ["key", "source", "pr", "prTitle", "url", "kind", "decision", "summary", "blocking", "nonBlocking", "feedback", "ask"],
+				"required": ["key", "source", "pr", "prTitle", "url", "kind", "decision", "summary", "commit", "blocking", "nonBlocking", "feedback", "ask"],
 				"properties": {
 					"key": { "type": "string" },
 					"source": { "const": "pr" },
@@ -18,6 +18,7 @@
 					"kind": { "enum": ["review_finished", "review_failed", "approved", "teammate_review", "dequeued", "merged", "other"] },
 					"decision": { "enum": ["not_important", "needs_attention", "needs_action"] },
 					"summary": { "type": "string" },
+					"commit": { "type": "string", "pattern": "^([0-9a-f]{40})?$" },
 					"blocking": {
 						"type": "array",
 						"items": {

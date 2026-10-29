@@ -6,6 +6,6 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 # printed an NDJSON "AI agent environment" notice to stdout, which became a Monitor event (2026-10-20).
 node="$HOME/.proto/bin/node"
 while true; do
-	"$node" "$here/src/tick.mjs" || echo "ERROR {\"message\":\"tick.mjs exited $? — see ~/concierge/state/loop.err\"}"
+	"$node" "$here/src/tick.mjs" || echo "ERROR tick.mjs exited $? — see ~/concierge/state/loop.err"
 	sleep 150
 done 2>>"$here/state/loop.err"
