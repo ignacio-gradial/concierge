@@ -3,7 +3,7 @@
 // its own; the Opus session runs handoff and close-tab when Ignacio asks.
 //   concierge-act close-workspace <pr>
 //   concierge-act ci-green <pr>
-//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--label <workspace name>] [--wait-minutes N]
+//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--label <workspace name>] [--new] [--wait-minutes N]
 //   concierge-act close-tab <tab-id>
 //   concierge-act find-agent <pr>
 // Each prints one result line and logs it. With --report, the result also goes to state/reports.jsonl, so the next
@@ -236,11 +236,12 @@ const TEMPLATES = {
 // PR. It sends nothing when the PR's worktree is ahead of or diverged from the reviewed head
 // or has uncommitted changes, or when the agent stays busy past the wait, and says why.
 // --dry-run prints the chosen agent and the prompt and sends nothing.
-export async function handoff(pr, kind, reviewedSha, { findings, also, label, waitMinutes = 20, report = false, dryRun = false }) {
+export async function handoff(pr, kind, reviewedSha, { findings, also, label, fresh: forceNew = false, waitMinutes = 20, report = false, dryRun = false }) {
 	const what = `#${pr} ${kind} hand-off`;
 	if (!TEMPLATES[kind]) throw new Error(`kind must be address or discuss, not ${kind}`);
 	const info = await prInfo(pr);
-	const { agent, reason } = await prAgent(info);
+	// --new skips the search, for when Ignacio wants a fresh agent rather than the one Haiku would pick.
+	const { agent, reason } = forceNew ? { agent: null, reason: "Ignacio asked for a new agent" } : await prAgent(info);
 	const worktree = await prWorktree(info.headRefName);
 	// A worktree behind the reviewed head is fine (a bot or another session pushed, such as gradial-gitops restamping a
 	// migration on 2026-10-28); one ahead of it or diverged may already address the feedback.
@@ -309,6 +310,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	const report = has("--report");
 	const nonBlocking = has("--non-blocking");
 	const dryRun = has("--dry-run");
+	const forceNew = has("--new");
 	const event = flag("--event");
 	const file = flag("--file");
 	const waitMinutes = Number(flag("--wait-minutes") ?? 20);
@@ -325,7 +327,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		if (typed && commit && !commit.startsWith(typed)) throw new Error(`reviewed sha ${typed} is not event ${event}'s commit ${commit}`);
 		const sha = commit || typed;
 		if (!sha) throw new Error(file ? "--file needs the reviewed sha" : `event ${event} has no commit (queued before 2026-10-29?): pass the reviewed sha`);
-		message = await handoff(Number(pr), kind, sha, { findings, also, label, waitMinutes, report, dryRun });
+		message = await handoff(Number(pr), kind, sha, { findings, also, label, fresh: forceNew, waitMinutes, report, dryRun });
 	} else if (command === "close-tab") message = await closeTab(rest[0], { report });
 	else if (command === "find-agent") {
 		const { agent, reason } = await prAgent(await prInfo(Number(rest[0])));
