@@ -3,7 +3,7 @@
 // its own; the Opus session runs handoff and close-tab when Ignacio asks.
 //   concierge-act close-workspace <pr>
 //   concierge-act ci-green <pr>
-//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--wait-minutes N]
+//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--label <workspace name>] [--wait-minutes N]
 //   concierge-act close-tab <tab-id>
 //   concierge-act find-agent <pr>
 // Each prints one result line and logs it. With --report, the result also goes to state/reports.jsonl, so the next
@@ -232,15 +232,15 @@ const TEMPLATES = {
 	],
 };
 
-// Hands PR feedback to the PR's own agent. It sends nothing when the PR's worktree is ahead of or diverged from the reviewed head
+// Hands PR feedback to the PR's own agent, or to a new agent in a new workspace named --label when none works on the
+// PR. It sends nothing when the PR's worktree is ahead of or diverged from the reviewed head
 // or has uncommitted changes, or when the agent stays busy past the wait, and says why.
 // --dry-run prints the chosen agent and the prompt and sends nothing.
-export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinutes = 20, report = false, dryRun = false }) {
+export async function handoff(pr, kind, reviewedSha, { findings, also, label, waitMinutes = 20, report = false, dryRun = false }) {
 	const what = `#${pr} ${kind} hand-off`;
 	if (!TEMPLATES[kind]) throw new Error(`kind must be address or discuss, not ${kind}`);
 	const info = await prInfo(pr);
 	const { agent, reason } = await prAgent(info);
-	if (!agent) return result(what, `#${pr} ${info.title}: sent nothing, no running agent works on it (${reason}).`, report);
 	const worktree = await prWorktree(info.headRefName);
 	// A worktree behind the reviewed head is fine (a bot or another session pushed, such as gradial-gitops restamping a
 	// migration on 2026-10-28); one ahead of it or diverged may already address the feedback.
@@ -259,6 +259,21 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, waitMinut
 		TEMPLATES[kind].join("\n"),
 		also ? `Also, from Ignacio: ${also}` : "",
 	].filter(Boolean).join("\n\n");
+	if (!agent) {
+		// No agent works on the PR: a new one gets it, in a workspace Ignacio can recognize by name. Everything it needs is
+		// in the PR, memory, docs and Linear; Concierge never relies on a previous agent's context (Ignacio, 2026-10-29).
+		const workspaceLabel = label ?? `#${pr}`;
+		const fresh = [
+			prompt,
+			`No agent was working on this PR when Concierge started you. Get the context from the PR (description, comments, reviews), the linked Linear ticket and ~/obsidian/memory. Work in the PR's worktree if \`git -C ~/v2.main worktree list\` shows one on ${info.headRefName} and it is clean; otherwise make your own worktree on that branch. ~/v2.main stays on main.`,
+		].join("\n\n");
+		if (dryRun) return `dry run · no running agent works on it (${reason}); would start one in a new workspace "${workspaceLabel}" · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${fresh}`;
+		const pane = (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", workspaceLabel, "--no-focus"])).root_pane.pane_id;
+		await new Promise((resolve) => setTimeout(resolve, 2_000));
+		await herdr(CONCIERGE_SOCKET, ["agent", "start", `pr-${pr}`, "--kind", "claude", "--pane", pane, "--timeout", "60000"], 90_000);
+		const line = await sendPrompt({ agent: pane, prompt: fresh, what: `#${pr} ${kind}`, socket: CONCIERGE_SOCKET });
+		return result(what, `#${pr} ${info.title}: no running agent worked on it, so started pr-${pr} in a new workspace "${workspaceLabel}". ${line.replace(/^handoff · /, "")}`, report);
+	}
 	if (dryRun) return `dry run · would send to ${where(agent)}, because ${reason} · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${prompt}`;
 	if (!IDLE.has(agent.agent_status)) {
 		try {
@@ -298,6 +313,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	const file = flag("--file");
 	const waitMinutes = Number(flag("--wait-minutes") ?? 20);
 	const also = flag("--also");
+	const label = flag("--label");
 	const [command, ...rest] = args;
 	let message;
 	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { report });
@@ -309,7 +325,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		if (typed && commit && !commit.startsWith(typed)) throw new Error(`reviewed sha ${typed} is not event ${event}'s commit ${commit}`);
 		const sha = commit || typed;
 		if (!sha) throw new Error(file ? "--file needs the reviewed sha" : `event ${event} has no commit (queued before 2026-10-29?): pass the reviewed sha`);
-		message = await handoff(Number(pr), kind, sha, { findings, also, waitMinutes, report, dryRun });
+		message = await handoff(Number(pr), kind, sha, { findings, also, label, waitMinutes, report, dryRun });
 	} else if (command === "close-tab") message = await closeTab(rest[0], { report });
 	else if (command === "find-agent") {
 		const { agent, reason } = await prAgent(await prInfo(Number(rest[0])));
