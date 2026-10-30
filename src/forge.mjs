@@ -169,7 +169,7 @@ export function reviewRequestsForMe(events, board) {
 			url: e.url,
 			kind: "review_requested",
 			decision: "needs_attention",
-			summary: `${e.actor} asked you to review #${e.number} by ${e.author}${e.isDraft ? " (draft)" : ""}.`,
+			summary: `${e.actor} asked you to review ${e.actor === e.author ? "their" : `${e.author}'s`} #${e.number}${e.isDraft ? " (draft)" : ""}.`,
 			blocking: [],
 			nonBlocking: [],
 			feedback: [],
