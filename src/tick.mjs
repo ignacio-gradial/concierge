@@ -21,7 +21,7 @@ import {
 } from "./signals.mjs";
 import { forgeBoard, forgeEvents, myActivity, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
 import { READY_FILE, updateReady } from "./ready.mjs";
-import { ciGreen, closeWorkspace, fileReport } from "./act.mjs";
+import { fileReport, retriggerReview } from "./act.mjs";
 import { sendPrompt } from "./handoff.mjs";
 import { haiku } from "./haiku.mjs";
 import { eventMessage, message } from "./monitor-lines.mjs";
@@ -90,16 +90,20 @@ function checkCommit(event, activity) {
 	if (!event.commit && REVIEWED.has(event.kind)) appendLog(`**event without a reviewed commit** · #${event.pr} ${event.kind} · key ${event.key}`);
 }
 
-// The actions, carried out here by src/act.mjs since 2026-10-28 (Ignacio): a merged PR's herdr workspace gets closed,
-// a merge-queue removal goes to the Merge Queue agent, and an approval with no feedback gets a CI agent once CI fails.
-// Results reach the Opus session as REPORT lines. A failed action is reported, never retried, so a tick can't start
-// the same agent twice.
+// The actions. Since 2026-10-30 Concierge (the Opus session) carries out every action whose target needs picking,
+// with src/act.mjs, from an ACTION line: closing a merged PR's workspace and starting a CI agent. Haiku only triages
+// (Ignacio). The tick itself runs only actions with a fixed target: the merge-queue hand-off and retrigger-review.
+// Every action is logged; a failed one is reported, never retried, so a tick can't do it twice.
+function emitAction(action) {
+	appendLog(`action · #${action.pr} ${action.action} · ACTION sent to Concierge`);
+	emit(`ACTION ${JSON.stringify(action)}\n`);
+}
+
 async function act(event, board, activity, next) {
 	try {
 		if (event.kind === "merged") {
-			appendLog(`action · #${event.pr} close_workspace`);
-			await notify(notificationTitle(event), "closing its herdr workspace", "done");
-			await closeWorkspace(event.pr, { report: true });
+			await notify(notificationTitle(event), "merged; Concierge closes its herdr workspace", "done");
+			emitAction({ action: "close_workspace", pr: event.pr, prTitle: event.prTitle, url: event.url, commit: event.commit, summary: event.summary });
 			return;
 		}
 		if (event.kind === "dequeued") {
@@ -114,7 +118,7 @@ async function act(event, board, activity, next) {
 				await sendPrompt({ agent: "merge-queue", prompt, what: `#${event.pr} investigate_dequeue` });
 			} catch (error) {
 				// The Opus session forwards it by hand.
-				emit(`ACTION ${JSON.stringify(action)}\n`);
+				emitAction(action);
 				throw error;
 			}
 			return;
@@ -122,25 +126,21 @@ async function act(event, board, activity, next) {
 		const ci = board.pullRequests.find((pr) => pr.number === event.pr)?.ci ?? null;
 		if (ci?.state === "passed") {
 			appendLog(`action skipped · #${event.pr} approved with no feedback and CI already passed`);
-			await notify(notificationTitle(event), "no feedback, CI already green", "done");
 			return;
 		}
 		if (ci?.state === "failed") {
-			appendLog(`action · #${event.pr} ci_green · CI failed`);
-			await notify(notificationTitle(event), "no feedback, sending a CI agent (CI failed)", "done");
-			await ciGreen(event.pr, { ci, report: true });
+			emitAction({ action: "ci_green", pr: event.pr, prTitle: event.prTitle, url: event.url, commit: event.commit, ci });
 			return;
 		}
 		appendLog(`action · #${event.pr} ci_green · CI ${ci?.state ?? "unknown"}, watching until it passes or fails`);
-		await notify(notificationTitle(event), `no feedback, watching CI (${ci?.state ?? "unknown"})`, "done");
-		next.ciWatch = { ...next.ciWatch, [event.pr]: { since: new Date().toISOString(), key: event.key } };
+		next.ciWatch = { ...next.ciWatch, [event.pr]: { since: new Date().toISOString(), key: event.key, prTitle: event.prTitle, url: event.url } };
 	} catch (error) {
 		fileReport(`#${event.pr} ${event.kind} action failed`, `#${event.pr}: the ${event.kind} action failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
 	}
 }
 
-// Approved PRs whose CI was still running: a CI agent once Forge's board says failed, nothing once it says passed. A
-// PR gone from the board (merged, closed, or idle past its window) stops being watched.
+// Approved PRs whose CI was still running: an ACTION for a CI agent once Forge's board says failed, a report once it
+// says passed. A PR gone from the board (merged, closed, or idle past its window) stops being watched.
 async function watchCi(board, next) {
 	for (const [number, watch] of Object.entries(next.ciWatch ?? {})) {
 		const pr = Number(number);
@@ -148,13 +148,18 @@ async function watchCi(board, next) {
 		if (ci?.state !== undefined && ci.state !== "passed" && ci.state !== "failed") continue;
 		const { [number]: _, ...rest } = next.ciWatch;
 		next.ciWatch = rest;
-		try {
-			if (!ci) appendLog(`ci watch · #${pr} left Forge's board, stopped watching (approved ${watch.since})`);
-			else if (ci.state === "passed") fileReport(`#${pr} ci_green`, `#${pr}: CI passed after the approval, no CI agent needed.`);
-			else await ciGreen(pr, { ci, report: true });
-		} catch (error) {
-			fileReport(`#${pr} ci_green failed`, `#${pr}: starting the CI agent failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
-		}
+		if (!ci) appendLog(`ci watch · #${pr} left Forge's board, stopped watching (approved ${watch.since})`);
+		else if (ci.state === "passed") fileReport(`#${pr} ci_green`, `#${pr}: CI passed after the approval, no CI agent needed.`);
+		else emitAction({ action: "ci_green", pr, prTitle: watch.prTitle, url: watch.url, ci });
+	}
+}
+
+// A failed Code Review gets re-run once per head, automatically (Ignacio, 2026-10-30).
+async function retrigger(event) {
+	try {
+		fileReport(`#${event.pr} retrigger_review`, await retriggerReview(event.pr));
+	} catch (error) {
+		fileReport(`#${event.pr} retrigger_review failed`, `#${event.pr}: re-running the failed Code Review failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
 	}
 }
 
@@ -208,7 +213,13 @@ async function main() {
 				await notify(notificationTitle(event), notificationBody(event), sound);
 				next.lastAttentionAt = new Date().toISOString();
 				emit(eventMessage(event));
+				if (event.kind === "review_failed") await retrigger(event);
 			} else if (event.decision === "needs_action") {
+				// Every approval reaches Concierge, including those with no feedback (Ignacio, 2026-10-30).
+				if (event.kind === "approved") {
+					await notify(notificationTitle(event), notificationBody(event), "done");
+					emit(eventMessage(event));
+				}
 				await act(event, board, activity, next);
 			}
 		}

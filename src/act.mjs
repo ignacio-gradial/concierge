@@ -1,13 +1,14 @@
-// Concierge's herdr actions as deterministic commands. They replaced the Herdr agent on 2026-10-28, so the same
-// inputs always do the same thing (Ignacio). The tick runs close-workspace, ci-green and the merge-queue hand-off on
-// its own; the Opus session runs handoff and close-tab when Ignacio asks.
-//   concierge-act close-workspace <pr>
-//   concierge-act ci-green <pr>
-//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) [--also <text>] [--label <workspace name>] [--new] [--wait-minutes N]
+// Concierge's herdr and GitHub actions as deterministic commands. They replaced the Herdr agent on 2026-10-28. Since
+// 2026-10-30 Concierge (the Opus session) picks every target itself from `agents` and passes it in; Haiku only triages
+// events (Ignacio). The tick runs only actions with a fixed target: the merge-queue hand-off and retrigger-review.
+//   concierge-act agents
+//   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) (--pane <Session/pane> | --new --label <name>) [--also <text>] [--wait-minutes N]
+//   concierge-act ci-green <pr> (--workspace <Session/workspace> | --label <name>) [--run <forge run url>]
+//   concierge-act close-workspace <pr> --workspace <Session/workspace>
 //   concierge-act close-tab <tab-id>
-//   concierge-act find-agent <pr>
-// Each prints one result line and logs it. With --report, the result also goes to state/reports.jsonl, so the next
-// tick relays it as a REPORT line.
+//   concierge-act retrigger-review <pr>
+// Each prints one result line and logs it as `act · …`. With --report, the result also goes to state/reports.jsonl, so
+// the next tick relays it as a REPORT line.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,7 +16,6 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { sendPrompt } from "./handoff.mjs";
-import { haiku } from "./haiku.mjs";
 import { appendLog } from "./signals.mjs";
 
 const run = promisify(execFile);
@@ -24,6 +24,7 @@ const REPO = path.join(HOME, "v2.main");
 const SESSIONS_DIR = path.join(HOME, ".config/herdr/sessions");
 const REPORTS_FILE = path.join(HOME, "concierge/state/reports.jsonl");
 const EVENTS_FILE = path.join(HOME, "concierge/state/events.jsonl");
+const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
 const IDLE = new Set(["idle", "done"]);
@@ -102,34 +103,35 @@ async function candidates() {
 	return found;
 }
 
-// The PR's agent is the one whose tab works on the PR, read from where it sits and what its tab shows, not from the
-// session that signed the PR: sessions end and their work moves to other tabs (Ignacio, 2026-10-28). Haiku picks it.
-// `openPrs` are Ignacio's other open PRs, for close-workspace to learn which of them the chosen workspace also serves.
-export async function prAgent(info, { openPrs = [] } = {}) {
-	const ids = signatures(info.body);
-	const found = await candidates();
-	if (!found.length) return { agent: null, reason: "no agent runs in any herdr session", alsoServes: [] };
-	const shown = found.map((a) => ({ id: a.id, workspace: a.workspace, tab: a.tab, title: a.title, agent: a.agent_session?.agent, status: a.agent_status, signsPr: signs(a, ids), screen: a.screen }));
-	const prompt = [
-		`Which herdr pane's agent is working on gradial/v2 PR #${info.number} "${info.title}"? Its branch is ${info.headRefName}, based on ${info.baseRefName}.`,
-		"A pane is the PR's when its terminal title, tab or workspace label, or recent screen shows it working on this PR: its number, its branch or worktree, or this PR's change. Concierge hands that agent the PR's review feedback or CI fixes, so among several prefer the one that writes the PR's code over one that only reviews or explains it.",
-		"Not the PR's: a pane that only mentions the PR while working on something else, or one working on another PR in the same area, including the PR this one is stacked on. Name the closest such pane in `reason`.",
-		"`signsPr` means the agent's session id is in the PR description, so it wrote the PR at some point. It is a hint; the pane's current work decides.",
-		"Answer `pane` with one candidate's `id`, or none when no pane is the PR's. `reason` is one sentence of evidence from the candidates. `alsoServes` lists the numbers from Other open PRs that any pane in the chosen pane's workspace works on, [] when none or when `pane` is none.",
-		`Candidates:\n${JSON.stringify(shown)}`,
-		`Other open PRs: ${openPrs.length ? JSON.stringify(openPrs.map((p) => ({ number: p.number, title: p.title, branch: p.headRefName }))) : "none"}`,
-	].join("\n\n");
-	const schema = {
-		type: "object",
-		additionalProperties: false,
-		required: ["pane", "reason", "alsoServes"],
-		properties: { pane: { enum: [...found.map((a) => a.id), "none"] }, reason: { type: "string" }, alsoServes: { type: "array", items: { type: "integer" } } },
-	};
-	const { structured_output: pick } = await haiku(prompt, schema, { args: ["--tools", "", "--strict-mcp-config"], timeout: 120_000 });
-	if (pick.pane === "none") return { agent: null, reason: pick.reason, alsoServes: [] };
-	const agent = found.find((a) => a.id === pick.pane);
-	if (!agent) throw new Error(`Haiku picked ${pick.pane}, which is not a running agent: ${pick.reason}`);
-	return { agent, reason: pick.reason, alsoServes: pick.alsoServes.filter((n) => openPrs.some((p) => p.number === n)) };
+// A target Concierge picked from `agents`: "Session/pane" (or a bare pane id in Concierge's session).
+async function agentById(id) {
+	const want = id.includes("/") ? id : `${path.basename(path.dirname(CONCIERGE_SOCKET))}/${id}`;
+	const agent = (await candidates()).find((a) => a.id === want);
+	if (!agent) throw new Error(`no running agent at ${want}; run concierge-act agents`);
+	return agent;
+}
+
+// The worktree an agent works in, from the status line Claude Code and omp print at the bottom of the pane
+// ("/Users/iguridi/v2.main/.worktrees/x (branch) Opus 5.5 …").
+function agentWorktree(agent) {
+	const paths = [...agent.screen.matchAll(/(\/Users\/[^\s()]+)\s+\(/g)].map((m) => m[1]);
+	return paths.at(-1) ?? null;
+}
+
+async function worktreeState(dir) {
+	const head = (await run("git", ["-C", dir, "rev-parse", "HEAD"], { timeout: 30_000 })).stdout.trim();
+	const dirty = (await run("git", ["-C", dir, "status", "--porcelain"], { timeout: 30_000 })).stdout.trim() !== "";
+	return { dir, head, dirty };
+}
+
+// One line per running agent, for Concierge to pick a target: where it sits, what it shows, and its status line.
+export async function listAgents() {
+	return (await candidates())
+		.map((a) => {
+			const status = a.screen.split("\n").filter((l) => /\/Users\/|PR #\d+/.test(l)).slice(-2).map((l) => l.trim()).join(" · ");
+			return `${a.id} · "${a.workspace}" / ${a.tab} · ${a.agent_status} · ${a.title}${status ? ` · ${status}` : ""}`.slice(0, 300);
+		})
+		.join("\n");
 }
 
 export const fileReport = (what, message) => result(what, message, true);
@@ -140,44 +142,45 @@ function result(what, message, report) {
 	return message;
 }
 
-// A merged PR's workspace closes only when every agent in it is idle and it works on no other open PR of Ignacio's;
-// one workspace often serves a stack. Agent sessions and worktrees stay on disk.
-export async function closeWorkspace(pr, { report = false } = {}) {
+// A merged PR's workspace, which Concierge picked, closes only when every agent in it is idle and none of them signs
+// another open PR of Ignacio's; one workspace often serves a stack. Agent sessions and worktrees stay on disk.
+export async function closeWorkspace(pr, { workspace, report = false } = {}) {
 	const what = `#${pr} close_workspace`;
+	if (!workspace) throw new Error("close-workspace needs --workspace <Session/workspace>, picked from concierge-act agents");
 	const info = await prInfo(pr);
-	const open = (await gh(["pr", "list", "--author", "ignacio-gradial", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,body"])).filter((p) => p.number !== pr);
-	const { agent, reason, alsoServes } = await prAgent(info, { openPrs: open });
-	if (!agent) return result(what, `#${pr} ${info.title}: no running agent works on it (${reason}). Closed nothing.`, report);
-	const members = (await allAgents()).filter((a) => a.socket === agent.socket && a.workspace_id === agent.workspace_id);
-	const label = `"${agent.workspace}" (${agent.workspace_id}, ${agent.session})`;
+	const [session, workspaceId] = workspace.split("/");
+	const socket = path.join(SESSIONS_DIR, session, "herdr.sock");
+	const open = (await gh(["pr", "list", "--author", "ignacio-gradial", "--state", "open", "--limit", "200", "--json", "number,body"])).filter((p) => p.number !== pr);
+	const members = (await allAgents()).filter((a) => a.socket === socket && a.workspace_id === workspaceId);
+	const { workspace: ws } = await herdr(socket, ["workspace", "get", workspaceId]);
+	const label = `"${ws.label}" (${workspaceId}, ${session})`;
+	if (socket === CONCIERGE_SOCKET && workspaceId === CONCIERGE_WORKSPACE) return result(what, `Refused: ${label} is Concierge's own workspace.`, report);
 	const busy = members.filter((a) => !IDLE.has(a.agent_status));
-	// Signatures still count here: a workspace stays open when its agents signed another open PR.
-	const signed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => p.number);
-	const stillUsed = [...new Set([...alsoServes, ...signed])].map((n) => `#${n}`);
+	const signed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => `#${p.number}`);
 	let line;
 	if (busy.length) line = `Left ${label} open: ${busy.map((a) => a.name ?? a.pane_id).join(", ")} still working.`;
-	else if (stillUsed.length) line = `Left ${label} open: it also works on open ${stillUsed.join(", ")}.`;
+	else if (signed.length) line = `Left ${label} open: its agents also sign open ${signed.join(", ")}.`;
 	else {
-		await herdr(agent.socket, ["workspace", "close", agent.workspace_id]);
-		line = `Closed ${label}: ${members.length} idle agent${members.length === 1 ? "" : "s"}, no other open PR.`;
+		await herdr(socket, ["workspace", "close", workspaceId]);
+		line = `Closed ${label}: ${members.length} idle agent${members.length === 1 ? "" : "s"}, none signing another open PR.`;
 	}
-	return result(what, `#${pr} ${info.title} merged. Its agent: ${where(agent)}, because ${reason} ${line} Agent sessions and worktrees stay on disk.`, report);
+	return result(what, `#${pr} ${info.title} merged. ${line} Agent sessions and worktrees stay on disk.`, report);
 }
 
-// An approval with no feedback while CI is failing: a new Claude agent in the PR's workspace, or in a new workspace
-// when no running agent works on the PR, makes CI green.
-export async function ciGreen(pr, { ci = null, report = false } = {}) {
+// An approval with no feedback while CI is failing: a new Claude agent, in a new tab of the workspace Concierge picked
+// or in a new workspace named --label, makes CI green.
+export async function ciGreen(pr, { ci = null, workspace, label, report = false } = {}) {
 	const what = `#${pr} ci_green`;
 	const info = await prInfo(pr);
-	const { agent } = await prAgent(info);
 	const name = `ci-${pr}`;
 	let socket = CONCIERGE_SOCKET;
 	let pane;
-	if (agent) {
-		socket = agent.socket;
-		pane = (await herdr(socket, ["tab", "create", "--workspace", agent.workspace_id, "--cwd", REPO, "--label", `CI #${pr}`, "--no-focus"])).root_pane.pane_id;
+	if (workspace) {
+		const [session, workspaceId] = workspace.split("/");
+		socket = path.join(SESSIONS_DIR, session, "herdr.sock");
+		pane = (await herdr(socket, ["tab", "create", "--workspace", workspaceId, "--cwd", REPO, "--label", `CI #${pr}`, "--no-focus"])).root_pane.pane_id;
 	} else {
-		pane = (await herdr(socket, ["workspace", "create", "--cwd", REPO, "--label", `#${pr} CI`, "--no-focus"])).root_pane.pane_id;
+		pane = (await herdr(socket, ["workspace", "create", "--cwd", REPO, "--label", label ?? `#${pr} CI`, "--no-focus"])).root_pane.pane_id;
 	}
 	await new Promise((resolve) => setTimeout(resolve, 2_000));
 	await herdr(socket, ["agent", "start", name, "--kind", "claude", "--pane", pane, "--timeout", "60000"], 90_000);
@@ -236,13 +239,16 @@ const TEMPLATES = {
 // PR. It sends nothing when the PR's worktree is ahead of or diverged from the reviewed head
 // or has uncommitted changes, or when the agent stays busy past the wait, and says why.
 // --dry-run prints the chosen agent and the prompt and sends nothing.
-export async function handoff(pr, kind, reviewedSha, { findings, also, label, fresh: forceNew = false, waitMinutes = 20, report = false, dryRun = false }) {
+export async function handoff(pr, kind, reviewedSha, { findings, also, label, pane, fresh: forceNew = false, waitMinutes = 20, report = false, dryRun = false }) {
 	const what = `#${pr} ${kind} hand-off`;
 	if (!TEMPLATES[kind]) throw new Error(`kind must be address or discuss, not ${kind}`);
 	const info = await prInfo(pr);
-	// --new skips the search, for when Ignacio wants a fresh agent rather than the one Haiku would pick.
-	const { agent, reason } = forceNew ? { agent: null, reason: "Ignacio asked for a new agent" } : await prAgent(info);
-	const worktree = await prWorktree(info.headRefName);
+	if (!pane && !forceNew) throw new Error("handoff needs --pane <Session/pane> (from concierge-act agents) or --new --label <name>");
+	const agent = pane ? await agentById(pane) : null;
+	const reason = agent ? "Concierge picked it" : "no agent works on it";
+	// The worktree to check is the agent's own, from its status line; for a new agent, the one on the PR's branch.
+	const agentDir = agent && agentWorktree(agent);
+	const worktree = agent ? (agentDir ? await worktreeState(agentDir).catch(() => null) : null) : await prWorktree(info.headRefName);
 	// A worktree behind the reviewed head is fine (a bot or another session pushed, such as gradial-gitops restamping a
 	// migration on 2026-10-28); one ahead of it or diverged may already address the feedback.
 	let behind = false;
@@ -295,6 +301,24 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, label, fr
 	return result(what, `#${pr} ${info.title}: sent to ${where(agent)}, because ${reason} ${line.replace(/^handoff · /, "")}`, report);
 }
 
+// A failed Code Review run on the PR's current head gets re-run, once per head (Ignacio, 2026-10-30). This is one of
+// the few GitHub writes Concierge makes itself; state/retriggers.json remembers which heads were re-run.
+export async function retriggerReview(pr, { report = false } = {}) {
+	const what = `#${pr} retrigger_review`;
+	const info = await prInfo(pr);
+	const runs = await gh(["run", "list", "--workflow", "code-review.yml", "--branch", info.headRefName, "--limit", "10", "--json", "databaseId,status,conclusion,headSha,event"]);
+	const latest = runs.find((r) => r.headSha === info.headRefOid && r.event === "pull_request");
+	if (!latest) return result(what, `#${pr} ${info.title}: no Code Review run on head ${info.headRefOid.slice(0, 8)}. Re-ran nothing.`, report);
+	if (latest.status !== "completed" || latest.conclusion !== "failure") return result(what, `#${pr} ${info.title}: the latest Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)} is ${latest.status}/${latest.conclusion ?? "none"}, not failed. Re-ran nothing.`, report);
+	const done = (() => { try { return JSON.parse(fs.readFileSync(RETRIGGERS_FILE, "utf8")); } catch { return {}; } })();
+	const key = `${pr}:${info.headRefOid}`;
+	if (done[key]) return result(what, `#${pr} ${info.title}: Code Review on ${info.headRefOid.slice(0, 8)} was already re-run once (run ${done[key].run} at ${done[key].at}). Re-ran nothing; Ignacio decides.`, report);
+	await run("gh", ["run", "rerun", String(latest.databaseId), "--repo", "gradial/v2"], { timeout: 60_000 });
+	done[key] = { run: latest.databaseId, at: new Date().toISOString() };
+	fs.writeFileSync(RETRIGGERS_FILE, `${JSON.stringify(done, null, 1)}\n`);
+	return result(what, `#${pr} ${info.title}: re-ran failed Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)}.`, report);
+}
+
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
 export async function closeTab(tabId, { report = false } = {}) {
 	const what = `close tab ${tabId}`;
@@ -324,10 +348,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	const waitMinutes = Number(flag("--wait-minutes") ?? 20);
 	const also = flag("--also");
 	const label = flag("--label");
+	const pane = flag("--pane");
+	const workspace = flag("--workspace");
+	const runUrl = flag("--run");
 	const [command, ...rest] = args;
 	let message;
-	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { report });
-	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { report });
+	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { workspace, report });
+	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { ci: runUrl ? { forgeRunUrl: runUrl } : null, workspace, label, report });
+	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
+	else if (command === "agents") message = await listAgents();
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
 		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
@@ -335,11 +364,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		if (typed && commit && !commit.startsWith(typed)) throw new Error(`reviewed sha ${typed} is not event ${event}'s commit ${commit}`);
 		const sha = commit || typed;
 		if (!sha) throw new Error(file ? "--file needs the reviewed sha" : `event ${event} has no commit (queued before 2026-10-29?): pass the reviewed sha`);
-		message = await handoff(Number(pr), kind, sha, { findings, also, label, fresh: forceNew, waitMinutes, report, dryRun });
+		message = await handoff(Number(pr), kind, sha, { findings, also, label, pane, fresh: forceNew, waitMinutes, report, dryRun });
 	} else if (command === "close-tab") message = await closeTab(rest[0], { report });
-	else if (command === "find-agent") {
-		const { agent, reason } = await prAgent(await prInfo(Number(rest[0])));
-		message = `#${rest[0]}: ${agent ? where(agent) : "no running agent works on it"}, because ${reason}`;
-	} else throw new Error("usage: concierge-act close-workspace|ci-green|handoff|close-tab|find-agent …");
+	else throw new Error("usage: concierge-act agents|handoff|ci-green|close-workspace|close-tab|retrigger-review …");
 	console.log(message);
 }
