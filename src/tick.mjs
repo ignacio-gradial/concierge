@@ -21,7 +21,7 @@ import {
 } from "./signals.mjs";
 import { forgeBoard, forgeEvents, myActivity, reviewRequestsForMe, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
 import { READY_FILE, updateReady } from "./ready.mjs";
-import { fileReport, retriggerReview } from "./act.mjs";
+import { fileReport, retriggerReview, review } from "./act.mjs";
 import { sendPrompt } from "./handoff.mjs";
 import { haiku } from "./haiku.mjs";
 import { eventMessage, message } from "./monitor-lines.mjs";
@@ -155,6 +155,14 @@ async function watchCi(board, next) {
 	}
 }
 
+async function startReview(event) {
+	try {
+		fileReport(`#${event.pr} review`, await review(event.pr));
+	} catch (error) {
+		fileReport(`#${event.pr} review failed`, `#${event.pr}: starting the review agent failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
+	}
+}
+
 // A failed Code Review gets re-run once per head, automatically (Ignacio, 2026-10-30).
 async function retrigger(event) {
 	try {
@@ -215,6 +223,9 @@ async function main() {
 				next.lastAttentionAt = new Date().toISOString();
 				emit(eventMessage(event));
 				if (event.kind === "review_failed") await retrigger(event);
+				// Someone asked Ignacio by name: a review agent starts in the Reviews workspace and approves when it finds no
+				// blocking items (Ignacio, 2026-10-30).
+				if (event.kind === "review_requested") await startReview(event);
 			} else if (event.decision === "needs_action") {
 				// Every approval reaches Concierge, including those with no feedback (Ignacio, 2026-10-30).
 				if (event.kind === "approved") {

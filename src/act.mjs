@@ -322,14 +322,23 @@ export async function retriggerReview(pr, { report = false } = {}) {
 	return result(what, `#${pr} ${info.title}: re-ran failed Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)}.`, report);
 }
 
+// A readable tab name from a PR title, for reviews the tick starts on its own: the first three words after the
+// conventional-commit prefix and ticket, in Title Case ("build(deps): move pnpm overrides …" → "Move Pnpm Overrides").
+export function labelFromTitle(title) {
+	const words = title.replace(/^[a-z]+(\([^)]*\))?!?:\s*/i, "").replace(/^\[[A-Z]+-\d+\]\s*/, "").split(/\s+/).filter(Boolean).slice(0, 3);
+	return words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
+}
+
 // Someone asked Ignacio by name to review their PR: a new Claude agent gives it a thermo-nuclear review (a review guide
 // in the repo that agents find) and approves it from Ignacio's account when it finds no blocking items (Ignacio,
 // 2026-10-30). With blocking items it posts nothing and waits for him in its tab. It goes in a new tab of the
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
 export async function review(pr, { label, effort = "high", report = false } = {}) {
 	const what = `#${pr} review`;
-	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions"]);
-	const name = label ?? `#${pr} Review`;
+	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state"]);
+	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
+	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
+	const name = label ?? labelFromTitle(info.title);
 	const { workspaces } = await herdr(CONCIERGE_SOCKET, ["workspace", "list"]);
 	const reviews = workspaces.find((w) => w.label === "Reviews");
 	const pane = reviews
