@@ -7,7 +7,7 @@
 //   concierge-act close-workspace <pr> --workspace <Session/workspace>
 //   concierge-act close-tab <tab-id>
 //   concierge-act retrigger-review <pr>
-//   concierge-act review <pr> --label <name> [--effort high]
+//   concierge-act review <pr> [--label <name>] [--effort high] [--comment-on-blockers]
 // Each prints one result line and logs it as `act · …`. With --report, the result also goes to state/reports.jsonl, so
 // the next tick relays it as a REPORT line.
 import { execFile } from "node:child_process";
@@ -333,7 +333,7 @@ export function labelFromTitle(title) {
 // in the repo that agents find) and approves it from Ignacio's account when it finds no blocking items (Ignacio,
 // 2026-10-30). With blocking items it posts nothing and waits for him in its tab. It goes in a new tab of the
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
-export async function review(pr, { label, effort = "high", report = false } = {}) {
+export async function review(pr, { label, effort = "high", commentOnBlockers = false, report = false } = {}) {
 	const what = `#${pr} review`;
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state"]);
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
@@ -345,14 +345,20 @@ export async function review(pr, { label, effort = "high", report = false } = {}
 		? (await herdr(CONCIERGE_SOCKET, ["tab", "create", "--workspace", reviews.workspace_id, "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id
 		: (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id;
 	await new Promise((resolve) => setTimeout(resolve, 2_000));
-	await herdr(CONCIERGE_SOCKET, ["agent", "start", `review-${pr}`, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
+	// A second pass on the same PR gets review-<pr>-2, -3…, since herdr agent names are unique.
+	const taken = new Set((await allAgents()).map((a) => a.name).filter(Boolean));
+	let agentName = `review-${pr}`;
+	for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
+	await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
 	const prompt = [
 		`thermo-nuclear review for ${info.url}`,
 		`"${info.title}" by ${info.author.login} (+${info.additions}/-${info.deletions}, branch ${info.headRefName}, head ${info.headRefOid.slice(0, 8)}${info.isDraft ? ", draft" : ""}). Ignacio was asked by name to review it, and asked Concierge Bot to send it to you.`,
 		"- Review the whole PR in a temporary worktree or checkout, against current main source, not docs. ~/v2.main stays on main.",
 		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global CLAUDE.md (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
 		`- No blocking items: approve it from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID).`,
-		"- Blocking items: post nothing on GitHub. Report each one here with file:line evidence and the fix you suggest, then wait for Ignacio.",
+		commentOnBlockers
+			? `- Blocking items: post a review comment from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
+			: "- Blocking items: post nothing on GitHub. Report each one here with file:line evidence and the fix you suggest, then wait for Ignacio.",
 		"- Never push to the PR's branch. Reply here with the verdict and what you posted.",
 	].join("\n");
 	const send = () => sendPrompt({ agent: pane, prompt, what: `#${pr} review`, socket: CONCIERGE_SOCKET });
@@ -360,7 +366,7 @@ export async function review(pr, { label, effort = "high", report = false } = {}
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: started review-${pr} (thermo-nuclear, effort ${effort}; approves when no blocking items). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: started ${agentName} (thermo-nuclear, effort ${effort}; approves when no blocking items, ${commentOnBlockers ? "comments" : "waits for Ignacio"} otherwise). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
@@ -401,7 +407,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { ci: runUrl ? { forgeRunUrl: runUrl } : null, workspace, label, report });
 	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
 	else if (command === "agents") message = await listAgents();
-	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", report });
+	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", commentOnBlockers: has("--comment-on-blockers"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
 		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
