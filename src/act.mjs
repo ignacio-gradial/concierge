@@ -275,7 +275,12 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, label, fr
 		const pane = (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", workspaceLabel, "--no-focus"])).root_pane.pane_id;
 		await new Promise((resolve) => setTimeout(resolve, 2_000));
 		await herdr(CONCIERGE_SOCKET, ["agent", "start", `pr-${pr}`, "--kind", "claude", "--pane", pane, "--timeout", "60000"], 90_000);
-		const line = await sendPrompt({ agent: pane, prompt: fresh, what: `#${pr} ${kind}`, socket: CONCIERGE_SOCKET });
+		// A just-started agent can miss its first prompt (agent_prompt_stalled, #11700 on 2026-10-30), so it gets one retry.
+		const send = () => sendPrompt({ agent: pane, prompt: fresh, what: `#${pr} ${kind}`, socket: CONCIERGE_SOCKET });
+		const line = await send().catch(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 10_000));
+			return send();
+		});
 		return result(what, `#${pr} ${info.title}: no running agent worked on it, so started pr-${pr} in a new workspace "${workspaceLabel}". ${line.replace(/^handoff · /, "")}`, report);
 	}
 	if (dryRun) return `dry run · would send to ${where(agent)}, because ${reason} · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${prompt}`;
