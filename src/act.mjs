@@ -115,7 +115,9 @@ async function agentById(id) {
 // ("/Users/iguridi/v2.main/.worktrees/x (branch) Opus 5.5 …").
 function agentWorktree(agent) {
 	const paths = [...agent.screen.matchAll(/(\/Users\/[^\s()]+)\s+\(/g)].map((m) => m[1]);
-	return paths.at(-1) ?? null;
+	// ~/v2.main stays on main, so an agent showing it works in some other worktree Concierge can't see: no check.
+	const dir = paths.at(-1) ?? null;
+	return dir && path.resolve(dir) !== REPO ? dir : null;
 }
 
 async function worktreeState(dir) {
