@@ -249,12 +249,15 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, label, fr
 	if (worktree && !worktree.head.startsWith(reviewedSha)) {
 		await run("git", ["-C", worktree.dir, "fetch", "--quiet", "origin", info.headRefName], { timeout: 120_000 });
 		behind = await run("git", ["-C", worktree.dir, "merge-base", "--is-ancestor", worktree.head, reviewedSha], { timeout: 30_000 }).then(() => true, () => false);
-		if (!behind) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, ahead of or diverged from the reviewed ${reviewedSha}.`, report);
+		if (!behind && agent) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, ahead of or diverged from the reviewed ${reviewedSha}.`, report);
 	}
-	if (worktree?.dirty) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} has uncommitted changes at ${worktree.head.slice(0, 8)}.`, report);
+	if (worktree?.dirty && agent) return result(what, `#${pr} ${info.title}: sent nothing, its worktree ${worktree.dir} has uncommitted changes at ${worktree.head.slice(0, 8)}.`, report);
+	// With no agent on the PR, a diverged or dirty worktree is leftover state (on 2026-10-29 #11700's was a 09-25 commit
+	// from before a rebase): the new agent leaves it alone and makes its own.
+	const unusable = worktree && !agent && (worktree.dirty || (!behind && !worktree.head.startsWith(reviewedSha)));
 	const prompt = [
 		`Concierge Bot hands you ${kind === "address" ? "feedback to address" : "feedback to discuss"} on PR #${pr} (${info.url}), reviewed at ${reviewedSha}. Ignacio asked for this.`,
-		behind ? `Your worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, behind the reviewed ${reviewedSha}: pull origin/${info.headRefName} first.` : "",
+		behind && agent ? `Your worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}, behind the reviewed ${reviewedSha}: pull origin/${info.headRefName} first.` : "",
 		"Read the full feedback on GitHub first: the Code Review sticky comment, or the teammate's review and its threads.",
 		`The items, verbatim:\n\n${findings}`,
 		TEMPLATES[kind].join("\n"),
@@ -266,7 +269,7 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, label, fr
 		const workspaceLabel = label ?? `#${pr}`;
 		const fresh = [
 			prompt,
-			`No agent was working on this PR when Concierge started you. Get the context from the PR (description, comments, reviews), the linked Linear ticket and ~/obsidian/memory. Work in the PR's worktree if \`git -C ~/v2.main worktree list\` shows one on ${info.headRefName} and it is clean; otherwise make your own worktree on that branch. ~/v2.main stays on main.`,
+			`No agent was working on this PR when Concierge started you. Get the context from the PR (description, comments, reviews), the linked Linear ticket and ~/obsidian/memory. ${unusable ? `The worktree ${worktree.dir} is at ${worktree.head.slice(0, 8)}${worktree.dirty ? " with uncommitted changes" : ", diverged from the PR's head"}; leave it alone and make your own worktree on origin/${info.headRefName}.` : `Work in the PR's worktree if \`git -C ~/v2.main worktree list\` shows one on ${info.headRefName} and it is clean; otherwise make your own worktree on that branch.`} ~/v2.main stays on main.`,
 		].join("\n\n");
 		if (dryRun) return `dry run · no running agent works on it (${reason}); would start one in a new workspace "${workspaceLabel}" · worktree ${worktree ? `${worktree.dir} at ${worktree.head.slice(0, 8)}` : "none found"}\n\n${fresh}`;
 		const pane = (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", workspaceLabel, "--no-focus"])).root_pane.pane_id;
