@@ -19,7 +19,7 @@ import {
 	STATE_FILE,
 	writeJsonAtomic,
 } from "./signals.mjs";
-import { forgeBoard, forgeEvents, myActivity, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
+import { forgeBoard, forgeEvents, myActivity, reviewRequestsForMe, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
 import { READY_FILE, updateReady } from "./ready.mjs";
 import { fileReport, retriggerReview } from "./act.mjs";
 import { sendPrompt } from "./handoff.mjs";
@@ -69,6 +69,7 @@ function notificationTitle(event) {
 	if (event.kind === "teammate_review") return `#${event.pr} teammate review`;
 	if (event.kind === "dequeued") return `#${event.pr} left the merge queue`;
 	if (event.kind === "merged") return `#${event.pr} merged`;
+	if (event.kind === "review_requested") return `#${event.pr} review requested`;
 	return `#${event.pr} needs you`;
 }
 
@@ -200,12 +201,12 @@ async function main() {
 		const mergeQueue = trackMergeQueue(board, activity, groups);
 		const { events, cost, turns, models } = activity.length ? await triage(activity) : { events: [], cost: 0, turns: 0, models: "no triage" };
 		const seen = new Set(state.seen);
-		const fresh = events.filter((e) => !seen.has(e.key));
+		const fresh = [...events, ...reviewRequestsForMe(feed, board)].filter((e) => !seen.has(e.key));
 		const next = { ...state, cursor: started.toISOString(), failing: undefined };
 		// Before any notification: if this fails, the next tick retries these events without re-notifying.
 		await updateReady(fresh, board, activity);
 		for (const event of fresh) {
-			checkCommit(event, activity);
+			if (event.source !== "review_request") checkCommit(event, activity);
 			fs.appendFileSync(QUEUE_FILE, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 			logEvent(event);
 			if (event.decision === "needs_attention") {

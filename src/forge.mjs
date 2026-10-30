@@ -153,3 +153,27 @@ export function myActivity(events, board) {
 	}
 	return [...grouped.values()];
 }
+
+// Someone asked Ignacio by name to review their PR (Ignacio, 2026-10-30). Only user requests count: team requests
+// such as platform-maintainers come from CODEOWNERS and are too noisy (63 of 354 requests on 10/29–30 were that team's,
+// 3 named him). The runner turns these into events itself; Haiku doesn't see other people's PRs.
+export function reviewRequestsForMe(events, board) {
+	const me = board.viewer.login;
+	return events
+		.filter((e) => e.type === "feed:pull_request:review" && e.action === "review_requested" && e.requestedReviewer?.kind === "user" && e.requestedReviewer.login === me && e.author !== me)
+		.map((e) => ({
+			key: `pr:${e.number}:review_request:${e.id}`,
+			source: "review_request",
+			pr: e.number,
+			prTitle: e.title,
+			url: e.url,
+			kind: "review_requested",
+			decision: "needs_attention",
+			summary: `${e.actor} asked you to review #${e.number} by ${e.author}${e.isDraft ? " (draft)" : ""}.`,
+			blocking: [],
+			nonBlocking: [],
+			feedback: [],
+			ask: { area: "", line: "", size: "" },
+			commit: e.headSha ?? "",
+		}));
+}
