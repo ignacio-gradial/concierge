@@ -22,6 +22,7 @@ import {
 import { forgeBoard, forgeEvents, myActivity, reviewRequestsForMe, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
 import { READY_FILE, updateReady } from "./ready.mjs";
 import { fileReport, retriggerReview, review } from "./act.mjs";
+import { reviewFileEvents } from "./review-files.mjs";
 import { sendPrompt } from "./handoff.mjs";
 import { haiku } from "./haiku.mjs";
 import { eventMessage, message } from "./monitor-lines.mjs";
@@ -70,6 +71,7 @@ function notificationTitle(event) {
 	if (event.kind === "dequeued") return `#${event.pr} left the merge queue`;
 	if (event.kind === "merged") return `#${event.pr} merged`;
 	if (event.kind === "review_requested") return `#${event.pr} review requested`;
+	if (event.kind === "tab_review") return `#${event.pr} review saved`;
 	return `#${event.pr} needs you`;
 }
 
@@ -209,12 +211,13 @@ async function main() {
 		const mergeQueue = trackMergeQueue(board, activity, groups);
 		const { events, cost, turns, models } = activity.length ? await triage(activity) : { events: [], cost: 0, turns: 0, models: "no triage" };
 		const seen = new Set(state.seen);
-		const fresh = [...events, ...reviewRequestsForMe(feed, board)].filter((e) => !seen.has(e.key));
-		const next = { ...state, cursor: started.toISOString(), failing: undefined };
+		const reviewFiles = await reviewFileEvents(state.reviewsSince);
+		const fresh = [...events, ...reviewRequestsForMe(feed, board), ...reviewFiles.events].filter((e) => !seen.has(e.key));
+		const next = { ...state, cursor: started.toISOString(), failing: undefined, reviewsSince: reviewFiles.cursor };
 		// Before any notification: if this fails, the next tick retries these events without re-notifying.
 		await updateReady(fresh, board, activity);
 		for (const event of fresh) {
-			if (event.source !== "review_request") checkCommit(event, activity);
+			if (event.source === "pr") checkCommit(event, activity);
 			fs.appendFileSync(QUEUE_FILE, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 			logEvent(event);
 			if (event.decision === "needs_attention") {
