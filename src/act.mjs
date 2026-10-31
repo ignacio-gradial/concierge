@@ -8,6 +8,7 @@
 //   concierge-act close-tab <tab-id>
 //   concierge-act retrigger-review <pr>
 //   concierge-act endorse <pr> [--note <text>]
+//   concierge-act ignore <pr> [--note <text>]
 //   concierge-act review <pr> [--label <name>] [--effort high] [--thermo-nuclear] [--comment-on-blockers]
 // Each prints one result line and logs it as `act · …`. With --report, the result also goes to state/reports.jsonl, so
 // the next tick relays it as a REPORT line.
@@ -28,6 +29,7 @@ const REPORTS_FILE = path.join(HOME, "concierge/state/reports.jsonl");
 const EVENTS_FILE = path.join(HOME, "concierge/state/events.jsonl");
 const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
 const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
+const IGNORED_FILE = path.join(HOME, "concierge/state/ignored.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
 const IDLE = new Set(["idle", "done"]);
@@ -346,6 +348,22 @@ function personName(login) {
 	}
 }
 
+function readJsonFile(file) {
+	try {
+		return JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+// PRs Ignacio doesn't care about for now: no automatic review starts for them (2026-10-31).
+export function ignore(pr, { note = "", report = false } = {}) {
+	const all = readJsonFile(IGNORED_FILE);
+	all[pr] = { at: new Date().toISOString(), note };
+	fs.writeFileSync(IGNORED_FILE, `${JSON.stringify(all, null, 1)}\n`);
+	return result(`#${pr} ignore`, `#${pr}: ignored, so no automatic review starts for it${note ? ` (${note})` : ""}.`, report);
+}
+
 function readEndorsed() {
 	try {
 		return JSON.parse(fs.readFileSync(ENDORSED_FILE, "utf8"));
@@ -391,6 +409,7 @@ export function labelFromTitle(title) {
 export async function review(pr, { label, effort = "high", thermoNuclear = false, commentOnBlockers = false, report = false } = {}) {
 	const what = `#${pr} review`;
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state,reviews"]);
+	if (readJsonFile(IGNORED_FILE)[pr]) return result(what, `#${pr}: Ignacio is ignoring this PR, so no review started.`, report);
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
 	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
@@ -476,6 +495,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { ci: runUrl ? { forgeRunUrl: runUrl } : null, workspace, label, report });
 	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
 	else if (command === "agents") message = await listAgents();
+	else if (command === "ignore") message = ignore(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "endorse") message = endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
 	else if (command === "handoff") {
