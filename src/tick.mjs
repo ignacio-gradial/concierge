@@ -165,7 +165,7 @@ async function startReview(event) {
 	}
 }
 
-// A failed Code Review gets re-run once per head, automatically (Ignacio, 2026-10-30).
+// A failed Code Review gets re-run up to twice per head, automatically (Ignacio, 2026-10-31).
 async function retrigger(event) {
 	try {
 		await retriggerReview(event.pr, { report: true });

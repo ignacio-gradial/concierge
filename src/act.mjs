@@ -28,6 +28,7 @@ const SESSIONS_DIR = path.join(HOME, ".config/herdr/sessions");
 const REPORTS_FILE = path.join(HOME, "concierge/state/reports.jsonl");
 const EVENTS_FILE = path.join(HOME, "concierge/state/events.jsonl");
 const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
+const MAX_RETRIGGERS = 2;
 const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
 const IGNORED_FILE = path.join(HOME, "concierge/state/ignored.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
@@ -321,8 +322,9 @@ export async function handoff(pr, kind, reviewedSha, { findings, also, label, pa
 	return result(what, `#${pr} ${info.title}: sent to ${where(agent)}, because ${reason} ${line.replace(/^handoff · /, "")}`, report);
 }
 
-// A failed Code Review run on the PR's current head gets re-run, once per head (Ignacio, 2026-10-30). This is one of
-// the few GitHub writes Concierge makes itself; state/retriggers.json remembers which heads were re-run.
+// A failed Code Review run on the PR's current head gets re-run, up to twice per head (Ignacio: once on 2026-10-30,
+// twice on 2026-10-31). This is one of the few GitHub writes Concierge makes itself; state/retriggers.json remembers
+// each head's re-runs.
 export async function retriggerReview(pr, { report = false } = {}) {
 	const what = `#${pr} retrigger_review`;
 	const info = await prInfo(pr);
@@ -332,11 +334,13 @@ export async function retriggerReview(pr, { report = false } = {}) {
 	if (latest.status !== "completed" || latest.conclusion !== "failure") return result(what, `#${pr} ${info.title}: the latest Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)} is ${latest.status}/${latest.conclusion ?? "none"}, not failed. Re-ran nothing.`, report);
 	const done = (() => { try { return JSON.parse(fs.readFileSync(RETRIGGERS_FILE, "utf8")); } catch { return {}; } })();
 	const key = `${pr}:${info.headRefOid}`;
-	if (done[key]) return result(what, `#${pr} ${info.title}: Code Review on ${info.headRefOid.slice(0, 8)} was already re-run once (run ${done[key].run} at ${done[key].at}). Re-ran nothing; Ignacio decides.`, report);
+	// Entries written before 2026-10-31 hold one re-run as an object.
+	const reruns = done[key] === undefined ? [] : [done[key]].flat();
+	if (reruns.length >= MAX_RETRIGGERS) return result(what, `#${pr} ${info.title}: Code Review on ${info.headRefOid.slice(0, 8)} was already re-run ${reruns.length} times (last at ${reruns.at(-1).at}). Re-ran nothing; Ignacio decides.`, report);
 	await run("gh", ["run", "rerun", String(latest.databaseId), "--repo", "gradial/v2"], { timeout: 60_000 });
-	done[key] = { run: latest.databaseId, at: new Date().toISOString() };
+	done[key] = [...reruns, { run: latest.databaseId, at: new Date().toISOString() }];
 	fs.writeFileSync(RETRIGGERS_FILE, `${JSON.stringify(done, null, 1)}\n`);
-	return result(what, `#${pr} ${info.title}: re-ran failed Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)}.`, report);
+	return result(what, `#${pr} ${info.title}: re-ran failed Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)} (${done[key].length} of ${MAX_RETRIGGERS} for this head).`, report);
 }
 
 // GitHub logins Ignacio knows by first name (people.json; Ignacio, 2026-10-30). Unknown logins stay as they are.
