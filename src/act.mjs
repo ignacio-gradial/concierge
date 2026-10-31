@@ -372,12 +372,11 @@ function readEndorsed() {
 	}
 }
 
-// Why Ignacio counts as having seen the PR's goal and approach, or null.
-function endorsement(pr, reviews = []) {
+// Why Ignacio counts as having seen the PR's goal and approach, or null. Only his own endorsement counts (2026-10-31):
+// an earlier approval from his account may have been an agent's, such as #14319's and #14220's.
+function endorsement(pr) {
 	const given = readEndorsed()[pr];
-	if (given) return `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}`;
-	const approved = reviews.find((r) => r.author?.login === "ignacio-gradial" && r.state === "APPROVED");
-	return approved ? `he approved it earlier, at ${approved.commit?.oid?.slice(0, 8) ?? "an earlier head"}` : null;
+	return given ? `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}` : null;
 }
 
 // Ignacio has seen a PR and approves of its goal and approach, so a clean review may approve it.
@@ -425,9 +424,9 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	let agentName = `review-${pr}`;
 	for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
 	await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
-	// Auto-approval needs Ignacio to have seen the PR and approved of its goal and approach (2026-10-31): an endorsement
-	// he gave Concierge (`concierge-act endorse`), or his own earlier approval of the PR.
-	const endorsedBy = endorsement(pr, info.reviews);
+	// Approving or commenting on GitHub needs Ignacio's own endorsement of the PR's goal and approach (`concierge-act
+	// endorse`, 2026-10-31). Without it the agent posts nothing, unless he asks for comments (--comment-on-blockers).
+	const endorsedBy = endorsement(pr);
 	const slug = reviewContextSlug(info.author.login);
 	const contextFile = `~/obsidian/memory/<date>-review-context-${slug}-<project>.md`;
 	const prompt = [
