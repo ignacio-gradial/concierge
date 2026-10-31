@@ -351,7 +351,8 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state"]);
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
-	const name = label ?? labelFromTitle(info.title);
+	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
+	const name = `${info.author.login} · ${label ?? labelFromTitle(info.title)}`;
 	const { workspaces } = await herdr(CONCIERGE_SOCKET, ["workspace", "list"]);
 	const reviews = workspaces.find((w) => w.label === "Reviews");
 	const pane = reviews
