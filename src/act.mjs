@@ -4,7 +4,7 @@
 //   concierge-act agents
 //   concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>) (--pane <Session/pane> | --new --label <name>) [--also <text>] [--wait-minutes N]
 //   concierge-act ci-green <pr> (--workspace <Session/workspace> | --label <name>) [--run <forge run url>]
-//   concierge-act close-workspace <pr> --workspace <Session/workspace>
+//   concierge-act close-workspace <pr> --workspace <Session/workspace> [--tabs <tab-id,…>]
 //   concierge-act close-tab <tab-id>
 //   concierge-act retrigger-review <pr>
 //   concierge-act review <pr> [--label <name>] [--effort high] [--thermo-nuclear] [--comment-on-blockers]
@@ -147,7 +147,7 @@ function result(what, message, report) {
 
 // A merged PR's workspace, which Concierge picked, closes only when every agent in it is idle and none of them signs
 // another open PR of Ignacio's; one workspace often serves a stack. Agent sessions and worktrees stay on disk.
-export async function closeWorkspace(pr, { workspace, report = false } = {}) {
+export async function closeWorkspace(pr, { workspace, tabs = [], report = false } = {}) {
 	const what = `#${pr} close_workspace`;
 	if (!workspace) throw new Error("close-workspace needs --workspace <Session/workspace>, picked from concierge-act agents");
 	const info = await prInfo(pr);
@@ -161,7 +161,20 @@ export async function closeWorkspace(pr, { workspace, report = false } = {}) {
 	const busy = members.filter((a) => !IDLE.has(a.agent_status));
 	const signed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => `#${p.number}`);
 	let line;
-	if (busy.length) line = `Left ${label} open: ${busy.map((a) => a.name ?? a.pane_id).join(", ")} still working.`;
+	// A workspace that still serves other work keeps running; the merged PR's own tabs, which Concierge picked, close
+	// instead when their agents are idle (Ignacio, 2026-10-30).
+	if (tabs.length && (busy.length || signed.length)) {
+		const closed = [];
+		for (const tabId of tabs) {
+			const inTab = members.filter((a) => a.tab_id === tabId);
+			if (inTab.some((a) => !IDLE.has(a.agent_status))) continue;
+			const { tab } = await herdr(socket, ["tab", "get", tabId]);
+			await herdr(socket, ["tab", "close", tabId]);
+			closed.push(`"${tab.label}" (${tabId})`);
+		}
+		const kept = tabs.length - closed.length;
+		line = `Left ${label} open for its other work and closed the PR's tab${closed.length === 1 ? "" : "s"} ${closed.join(", ") || "none"}${kept ? `; ${kept} still working, kept` : ""}.`;
+	} else if (busy.length) line = `Left ${label} open: ${busy.map((a) => a.name ?? a.pane_id).join(", ")} still working.`;
 	else if (signed.length) line = `Left ${label} open: its agents also sign open ${signed.join(", ")}.`;
 	else {
 		await herdr(socket, ["workspace", "close", workspaceId]);
@@ -404,7 +417,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	const runUrl = flag("--run");
 	const [command, ...rest] = args;
 	let message;
-	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { workspace, report });
+	if (command === "close-workspace") message = await closeWorkspace(Number(rest[0]), { workspace, tabs: (flag("--tabs") ?? "").split(",").filter(Boolean), report });
 	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { ci: runUrl ? { forgeRunUrl: runUrl } : null, workspace, label, report });
 	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
 	else if (command === "agents") message = await listAgents();
