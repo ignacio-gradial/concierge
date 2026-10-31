@@ -335,6 +335,15 @@ export async function retriggerReview(pr, { report = false } = {}) {
 	return result(what, `#${pr} ${info.title}: re-ran failed Code Review run ${latest.databaseId} on ${info.headRefOid.slice(0, 8)}.`, report);
 }
 
+// GitHub logins Ignacio knows by first name (people.json; Ignacio, 2026-10-30). Unknown logins stay as they are.
+function personName(login) {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(HOME, "concierge/people.json"), "utf8"))[login] ?? login;
+	} catch {
+		return login;
+	}
+}
+
 // A readable tab name from a PR title, for reviews the tick starts on its own: the first three words after the
 // conventional-commit prefix and ticket, in Title Case ("build(deps): move pnpm overrides …" → "Move Pnpm Overrides").
 export function labelFromTitle(title) {
@@ -352,7 +361,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
 	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
-	const name = `${info.author.login} · ${label ?? labelFromTitle(info.title)}`;
+	const name = `${personName(info.author.login)} · ${label ?? labelFromTitle(info.title)}`;
 	const { workspaces } = await herdr(CONCIERGE_SOCKET, ["workspace", "list"]);
 	const reviews = workspaces.find((w) => w.label === "Reviews");
 	const pane = reviews
