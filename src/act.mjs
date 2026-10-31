@@ -371,12 +371,10 @@ export function endorse(pr, { note = "", report = false } = {}) {
 }
 
 // What Concierge's review agents learned about a person, so the next review of their PRs starts from it (Ignacio,
-// 2026-10-31): one memory file per person, ~/obsidian/memory/<date>-review-context-<name>.md, appended after each review.
-function reviewContextFile(login) {
-	const slug = personName(login).toLowerCase().replace(/[^a-z0-9]+/g, "-");
-	const dir = path.join(HOME, "obsidian/memory");
-	const existing = fs.readdirSync(dir).find((f) => f.endsWith(`-review-context-${slug}.md`));
-	return path.join(dir, existing ?? `${new Date().toISOString().slice(0, 10)}-review-context-${slug}.md`);
+// 2026-10-31). One memory file per person and project, so none grows too big:
+// ~/obsidian/memory/<date>-review-context-<name>-<two-word-project>.md. The agent picks or creates the project file.
+function reviewContextSlug(login) {
+	return personName(login).toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
 // A readable tab name from a PR title, for reviews the tick starts on its own: the first three words after the
@@ -411,12 +409,13 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// Auto-approval needs Ignacio to have seen the PR and approved of its goal and approach (2026-10-31): an endorsement
 	// he gave Concierge (`concierge-act endorse`), or his own earlier approval of the PR.
 	const endorsedBy = endorsement(pr, info.reviews);
-	const contextFile = reviewContextFile(info.author.login);
+	const slug = reviewContextSlug(info.author.login);
+	const contextFile = `~/obsidian/memory/<date>-review-context-${slug}-<project>.md`;
 	const prompt = [
 		// Thermo-nuclear reviews only when Ignacio asks for one (2026-10-30); otherwise a regular full review.
 		thermoNuclear ? `thermo-nuclear review for ${info.url}` : `Review ${info.url} for correctness bugs, security and permission holes, and missing tests.`,
 		`"${info.title}" by ${info.author.login} (+${info.additions}/-${info.deletions}, branch ${info.headRefName}, head ${info.headRefOid.slice(0, 8)}${info.isDraft ? ", draft" : ""}). Ignacio was asked by name to review it, and asked Concierge Bot to send it to you.`,
-		`- First read ${contextFile} if it exists: what earlier reviews learned about ${personName(info.author.login)}'s PRs (areas, recurring issues, decisions Ignacio made). Use it, but verify against the code.`,
+		`- First list ~/obsidian/memory/*-review-context-${slug}-*.md: one file per project of ${personName(info.author.login)}'s, named with two words for the project (such as better-auth or scim-tenants). Read the one for this PR's project, if any, and any others that touch the same code: what earlier reviews learned (areas, recurring issues, decisions Ignacio made). Use it, but verify against the code.`,
 		"- Review the whole PR in a temporary worktree or checkout, against current main source, not docs. ~/v2.main stays on main.",
 		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global CLAUDE.md (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
 		"- End the saved review and your reply with one decision line: `auto-approve: yes` when there are no blocking items and nothing surprises you, `needs-ignacio: <why>` for a change in user-facing behavior, policy or security posture or anything you aren't confident about, or `needs-context: <question>` when it depends on a decision, ticket or conversation you can't see.",
@@ -428,7 +427,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 			: commentOnBlockers
 			? `- Blocking items: post a review comment from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
 			: "- Blocking items: post nothing on GitHub. Report each one here with file:line evidence and the fix you suggest, then wait for Ignacio.",
-		`- After posting, append a dated entry to ${contextFile} (create it with a one-line header if it doesn't exist): the PR and its goal, the decision and what you posted, and anything worth remembering for this person's next review, such as a recurring issue, an area they own, a convention they follow, or a decision Ignacio made. Keep it to a few lines; facts only.`,
+		`- After posting, append a dated entry to this PR's project file, ${contextFile} with today's date and a two-word project name when it's new (one-line header: person, login, project): the PR and its goal, the decision and what you posted, and anything worth remembering for this person's next review, such as a recurring issue, an area they own, a convention they follow, or a decision Ignacio made. Keep it to a few lines; facts only.`,
 		"- Never push to the PR's branch. Reply here with the verdict and what you posted.",
 	].filter(Boolean).join("\n");
 	const send = () => sendPrompt({ agent: pane, prompt, what: `#${pr} review`, socket: CONCIERGE_SOCKET });
