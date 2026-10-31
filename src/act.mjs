@@ -410,19 +410,21 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global CLAUDE.md (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
 		"- End the saved review and your reply with one decision line: `auto-approve: yes` when there are no blocking items and nothing surprises you, `needs-ignacio: <why>` for a change in user-facing behavior, policy or security posture or anything you aren't confident about, or `needs-context: <question>` when it depends on a decision, ticket or conversation you can't see.",
 		endorsedBy
-			? `- Ignacio has seen this PR and approved of its goal and approach (${endorsedBy}). With \`auto-approve: yes\`, approve it from his account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID).`
+			? `- Ignacio has seen this PR and approved of its goal and approach (${endorsedBy}). With \`auto-approve: yes\`, approve it from his account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID). Otherwise (blocking items, \`needs-ignacio\` or \`needs-context\`), post the feedback as a review comment from his account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item or concern with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
 			: "- Ignacio hasn't seen this PR's goal and approach yet, so never approve it. With no blocking items, post nothing and reply here with a short summary of the PR's goal and approach and your decision line, so he can decide.",
-		commentOnBlockers
+		endorsedBy
+			? ""
+			: commentOnBlockers
 			? `- Blocking items: post a review comment from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
 			: "- Blocking items: post nothing on GitHub. Report each one here with file:line evidence and the fix you suggest, then wait for Ignacio.",
 		"- Never push to the PR's branch. Reply here with the verdict and what you posted.",
-	].join("\n");
+	].filter(Boolean).join("\n");
 	const send = () => sendPrompt({ agent: pane, prompt, what: `#${pr} review`, socket: CONCIERGE_SOCKET });
 	const line = await send().catch(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: started ${agentName} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "approves when clean" : "never approves, not endorsed"}, ${commentOnBlockers ? "comments" : "waits for Ignacio"} on blockers). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: started ${agentName} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
