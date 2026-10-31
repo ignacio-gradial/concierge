@@ -7,6 +7,7 @@
 //   concierge-act close-workspace <pr> --workspace <Session/workspace> [--tabs <tab-id,…>]
 //   concierge-act close-tab <tab-id>
 //   concierge-act retrigger-review <pr>
+//   concierge-act endorse <pr> [--note <text>]
 //   concierge-act review <pr> [--label <name>] [--effort high] [--thermo-nuclear] [--comment-on-blockers]
 // Each prints one result line and logs it as `act · …`. With --report, the result also goes to state/reports.jsonl, so
 // the next tick relays it as a REPORT line.
@@ -26,6 +27,7 @@ const SESSIONS_DIR = path.join(HOME, ".config/herdr/sessions");
 const REPORTS_FILE = path.join(HOME, "concierge/state/reports.jsonl");
 const EVENTS_FILE = path.join(HOME, "concierge/state/events.jsonl");
 const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
+const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
 const IDLE = new Set(["idle", "done"]);
@@ -344,6 +346,30 @@ function personName(login) {
 	}
 }
 
+function readEndorsed() {
+	try {
+		return JSON.parse(fs.readFileSync(ENDORSED_FILE, "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+// Why Ignacio counts as having seen the PR's goal and approach, or null.
+function endorsement(pr, reviews = []) {
+	const given = readEndorsed()[pr];
+	if (given) return `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}`;
+	const approved = reviews.find((r) => r.author?.login === "ignacio-gradial" && r.state === "APPROVED");
+	return approved ? `he approved it earlier, at ${approved.commit?.oid?.slice(0, 8) ?? "an earlier head"}` : null;
+}
+
+// Ignacio has seen a PR and approves of its goal and approach, so a clean review may approve it.
+export function endorse(pr, { note = "", report = false } = {}) {
+	const all = readEndorsed();
+	all[pr] = { at: new Date().toISOString(), note };
+	fs.writeFileSync(ENDORSED_FILE, `${JSON.stringify(all, null, 1)}\n`);
+	return result(`#${pr} endorse`, `#${pr}: endorsed, so a clean review may approve it${note ? ` (${note})` : ""}.`, report);
+}
+
 // A readable tab name from a PR title, for reviews the tick starts on its own: the first three words after the
 // conventional-commit prefix and ticket, in Title Case ("build(deps): move pnpm overrides …" → "Move Pnpm Overrides").
 export function labelFromTitle(title) {
@@ -357,7 +383,7 @@ export function labelFromTitle(title) {
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
 export async function review(pr, { label, effort = "high", thermoNuclear = false, commentOnBlockers = false, report = false } = {}) {
 	const what = `#${pr} review`;
-	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state"]);
+	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state,reviews"]);
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
 	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
@@ -373,13 +399,19 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	let agentName = `review-${pr}`;
 	for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
 	await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
+	// Auto-approval needs Ignacio to have seen the PR and approved of its goal and approach (2026-10-31): an endorsement
+	// he gave Concierge (`concierge-act endorse`), or his own earlier approval of the PR.
+	const endorsedBy = endorsement(pr, info.reviews);
 	const prompt = [
 		// Thermo-nuclear reviews only when Ignacio asks for one (2026-10-30); otherwise a regular full review.
 		thermoNuclear ? `thermo-nuclear review for ${info.url}` : `Review ${info.url} for correctness bugs, security and permission holes, and missing tests.`,
 		`"${info.title}" by ${info.author.login} (+${info.additions}/-${info.deletions}, branch ${info.headRefName}, head ${info.headRefOid.slice(0, 8)}${info.isDraft ? ", draft" : ""}). Ignacio was asked by name to review it, and asked Concierge Bot to send it to you.`,
 		"- Review the whole PR in a temporary worktree or checkout, against current main source, not docs. ~/v2.main stays on main.",
 		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global CLAUDE.md (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
-		`- No blocking items: approve it from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID).`,
+		"- End the saved review and your reply with one decision line: `auto-approve: yes` when there are no blocking items and nothing surprises you, `needs-ignacio: <why>` for a change in user-facing behavior, policy or security posture or anything you aren't confident about, or `needs-context: <question>` when it depends on a decision, ticket or conversation you can't see.",
+		endorsedBy
+			? `- Ignacio has seen this PR and approved of its goal and approach (${endorsedBy}). With \`auto-approve: yes\`, approve it from his account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID).`
+			: "- Ignacio hasn't seen this PR's goal and approach yet, so never approve it. With no blocking items, post nothing and reply here with a short summary of the PR's goal and approach and your decision line, so he can decide.",
 		commentOnBlockers
 			? `- Blocking items: post a review comment from Ignacio's account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
 			: "- Blocking items: post nothing on GitHub. Report each one here with file:line evidence and the fix you suggest, then wait for Ignacio.",
@@ -390,7 +422,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: started ${agentName} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; approves when no blocking items, ${commentOnBlockers ? "comments" : "waits for Ignacio"} otherwise). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: started ${agentName} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "approves when clean" : "never approves, not endorsed"}, ${commentOnBlockers ? "comments" : "waits for Ignacio"} on blockers). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
@@ -431,6 +463,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "ci-green") message = await ciGreen(Number(rest[0]), { ci: runUrl ? { forgeRunUrl: runUrl } : null, workspace, label, report });
 	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
 	else if (command === "agents") message = await listAgents();
+	else if (command === "endorse") message = endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
