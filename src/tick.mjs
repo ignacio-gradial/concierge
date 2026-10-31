@@ -157,7 +157,7 @@ async function watchCi(board, next) {
 
 async function startReview(event) {
 	try {
-		fileReport(`#${event.pr} review`, await review(event.pr));
+		await review(event.pr, { report: true });
 	} catch (error) {
 		fileReport(`#${event.pr} review failed`, `#${event.pr}: starting the review agent failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
 	}
@@ -166,7 +166,7 @@ async function startReview(event) {
 // A failed Code Review gets re-run once per head, automatically (Ignacio, 2026-10-30).
 async function retrigger(event) {
 	try {
-		fileReport(`#${event.pr} retrigger_review`, await retriggerReview(event.pr));
+		await retriggerReview(event.pr, { report: true });
 	} catch (error) {
 		fileReport(`#${event.pr} retrigger_review failed`, `#${event.pr}: re-running the failed Code Review failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
 	}
