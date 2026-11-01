@@ -417,17 +417,29 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
 	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
 	const name = `${personName(info.author.login)} · ${label ?? labelFromTitle(info.title)}`;
-	const { workspaces } = await herdr(CONCIERGE_SOCKET, ["workspace", "list"]);
-	const reviews = workspaces.find((w) => w.label === "Reviews");
-	const pane = reviews
-		? (await herdr(CONCIERGE_SOCKET, ["tab", "create", "--workspace", reviews.workspace_id, "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id
-		: (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id;
-	await new Promise((resolve) => setTimeout(resolve, 2_000));
-	// A second pass on the same PR gets review-<pr>-2, -3…, since herdr agent names are unique.
-	const taken = new Set((await allAgents()).map((a) => a.name).filter(Boolean));
-	let agentName = `review-${pr}`;
-	for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
-	await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
+	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
+	// (Ignacio, 2026-10-31). The newest one wins when several are left.
+	const agents = await allAgents();
+	const suffix = (n) => Number(n.match(/-(\d+)$/)?.[1] ?? 1);
+	const reused = agents
+		.filter((a) => a.socket === CONCIERGE_SOCKET && new RegExp(`^review-${pr}(-\\d+)?$`).test(a.name ?? ""))
+		.sort((a, b) => suffix(a.name) - suffix(b.name))
+		.at(-1);
+	let pane = reused?.pane_id;
+	let agentName = reused?.name;
+	if (!reused) {
+		const { workspaces } = await herdr(CONCIERGE_SOCKET, ["workspace", "list"]);
+		const reviews = workspaces.find((w) => w.label === "Reviews");
+		pane = reviews
+			? (await herdr(CONCIERGE_SOCKET, ["tab", "create", "--workspace", reviews.workspace_id, "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id
+			: (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", name, "--no-focus"])).root_pane.pane_id;
+		await new Promise((resolve) => setTimeout(resolve, 2_000));
+		// A pass after the PR's review agent exited gets review-<pr>-2, -3…, since herdr agent names are unique.
+		const taken = new Set(agents.map((a) => a.name).filter(Boolean));
+		agentName = `review-${pr}`;
+		for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
+		await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
+	}
 	// Approving or commenting on GitHub needs Ignacio's own endorsement of the PR's goal and approach (`concierge-act
 	// endorse`, 2026-10-31). Without it the agent posts nothing, unless he asks for comments (--comment-on-blockers).
 	const endorsedBy = endorsement(pr);
@@ -436,6 +448,9 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	const prompt = [
 		// Thermo-nuclear reviews only when Ignacio asks for one (2026-10-30); otherwise a regular full review.
 		thermoNuclear ? `thermo-nuclear review for ${info.url}` : `Review ${info.url} for correctness bugs, security and permission holes, and missing tests.`,
+		reused
+			? `This is another pass on a PR you reviewed before, now at head ${info.headRefOid.slice(0, 8)}. Re-read your last review in ~/reviews/${pr}-*.md, check each earlier item against the new head, and review what changed since the head you last reviewed, plus anything it touches. Save a new review file; don't edit the old one. The rules below are current and replace the earlier ones (Ignacio's endorsement may have changed).`
+			: "",
 		`"${info.title}" by ${info.author.login} (+${info.additions}/-${info.deletions}, branch ${info.headRefName}, head ${info.headRefOid.slice(0, 8)}${info.isDraft ? ", draft" : ""}). Ignacio was asked by name to review it, and asked Concierge Bot to send it to you.`,
 		`- First list ~/obsidian/memory/*-review-context-${slug}-*.md: one file per project of ${personName(info.author.login)}'s, named with two words for the project (such as better-auth or scim-tenants). Read the one for this PR's project, if any, and any others that touch the same code: what earlier reviews learned (areas, recurring issues, decisions Ignacio made). Use it, but verify against the code.`,
 		"- Review the whole PR in a temporary worktree or checkout, against current main source, not docs. ~/v2.main stays on main.",
@@ -457,7 +472,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: started ${agentName} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: ${reused ? `reused ${agentName}, which reviewed it before,` : `started ${agentName}`} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
