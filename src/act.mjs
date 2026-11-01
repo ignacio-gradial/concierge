@@ -420,7 +420,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
 	// (Ignacio, 2026-10-31). The newest one wins when several are left.
 	const agents = await allAgents();
-	const suffix = (n) => Number(n.match(/-(\d+)$/)?.[1] ?? 1);
+	const suffix = (n) => Number(n.match(/^review-\d+-(\d+)$/)?.[1] ?? 1);
 	const reused = agents
 		.filter((a) => a.socket === CONCIERGE_SOCKET && new RegExp(`^review-${pr}(-\\d+)?$`).test(a.name ?? ""))
 		.sort((a, b) => suffix(a.name) - suffix(b.name))
