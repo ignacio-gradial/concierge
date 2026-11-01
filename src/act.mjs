@@ -472,7 +472,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: ${reused ? `reused ${agentName}, which reviewed it before,` : `started ${agentName}`} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: ${reused ? `reused ${agentName}, which reviewed it before` : `started ${agentName}`} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
