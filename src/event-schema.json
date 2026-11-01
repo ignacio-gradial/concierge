@@ -24,8 +24,8 @@
 						"items": {
 							"type": "object",
 							"additionalProperties": false,
-							"required": ["title", "anchor", "explanation"],
-							"properties": { "title": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" } }
+							"required": ["title", "anchor", "explanation", "ci"],
+							"properties": { "title": { "type": "string" }, "anchor": { "type": "string" }, "explanation": { "type": "string" }, "ci": { "type": "boolean" } }
 						}
 					},
 					"nonBlocking": {

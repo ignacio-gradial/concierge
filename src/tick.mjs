@@ -126,20 +126,37 @@ async function act(event, board, activity, next) {
 			}
 			return;
 		}
-		const ci = board.pullRequests.find((pr) => pr.number === event.pr)?.ci ?? null;
-		if (ci?.state === "passed") {
-			appendLog(`action skipped · #${event.pr} approved with no feedback and CI already passed`);
-			return;
-		}
-		if (ci?.state === "failed") {
-			emitAction({ action: "ci_green", pr: event.pr, prTitle: event.prTitle, url: event.url, commit: event.commit, ci });
-			return;
-		}
-		appendLog(`action · #${event.pr} ci_green · CI ${ci?.state ?? "unknown"}, watching until it passes or fails`);
-		next.ciWatch = { ...next.ciWatch, [event.pr]: { since: new Date().toISOString(), key: event.key, prTitle: event.prTitle, url: event.url } };
+		ciGreen(event, board, next, "approved with no feedback");
 	} catch (error) {
 		fileReport(`#${event.pr} ${event.kind} action failed`, `#${event.pr}: the ${event.kind} action failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
 	}
+}
+
+// A PR with nothing left to fix but CI gets an agent to make Merge Gate green: an approval with no feedback, or a
+// finished review whose blockers are none or only about CI runs (Ignacio, 2026-10-31). Once per head, so a PR's
+// later reviews on the same head don't start a second CI agent.
+function ciGreen(event, board, next, why) {
+	const pr = board.pullRequests.find((p) => p.number === event.pr);
+	const ci = pr?.ci ?? null;
+	if (ci?.state === "passed") {
+		appendLog(`action skipped · #${event.pr} ${why} and CI already passed`);
+		return;
+	}
+	if (pr && next.ciGreenSent?.[event.pr] === pr.headSha) {
+		appendLog(`action skipped · #${event.pr} ${why}; a CI agent was already sent for ${pr.headSha.slice(0, 8)}`);
+		return;
+	}
+	if (ci?.state === "failed") {
+		next.ciGreenSent = { ...next.ciGreenSent, [event.pr]: pr.headSha };
+		emitAction({ action: "ci_green", pr: event.pr, prTitle: event.prTitle, url: event.url, commit: event.commit, why, ci });
+		return;
+	}
+	appendLog(`action · #${event.pr} ci_green · ${why}, CI ${ci?.state ?? "unknown"}, watching until it passes or fails`);
+	next.ciWatch = { ...next.ciWatch, [event.pr]: { since: new Date().toISOString(), key: event.key, prTitle: event.prTitle, url: event.url, why } };
+}
+
+function onlyCiBlockers(event) {
+	return event.kind === "review_finished" && event.source === "pr" && event.blocking.every((b) => b.ci === true);
 }
 
 // Approved PRs whose CI was still running: an ACTION for a CI agent once Forge's board says failed, a report once it
@@ -152,8 +169,13 @@ async function watchCi(board, next) {
 		const { [number]: _, ...rest } = next.ciWatch;
 		next.ciWatch = rest;
 		if (!ci) appendLog(`ci watch · #${pr} left Forge's board, stopped watching (approved ${watch.since})`);
-		else if (ci.state === "passed") fileReport(`#${pr} ci_green`, `#${pr}: CI passed after the approval, no CI agent needed.`);
-		else emitAction({ action: "ci_green", pr, prTitle: watch.prTitle, url: watch.url, ci });
+		else if (ci.state === "passed") fileReport(`#${pr} ci_green`, `#${pr}: CI passed (${watch.why ?? "approved"}), no CI agent needed.`);
+		else {
+			const head = board.pullRequests.find((p) => p.number === pr).headSha;
+			if (next.ciGreenSent?.[pr] === head) continue;
+			next.ciGreenSent = { ...next.ciGreenSent, [pr]: head };
+			emitAction({ action: "ci_green", pr, prTitle: watch.prTitle, url: watch.url, why: watch.why ?? "approved with no feedback", ci });
+		}
 	}
 }
 
@@ -229,6 +251,7 @@ async function main() {
 				// Someone asked Ignacio by name: a review agent starts in the Reviews workspace and approves when it finds no
 				// blocking items (Ignacio, 2026-10-30).
 				if (event.kind === "review_requested") await startReview(event);
+				if (onlyCiBlockers(event)) ciGreen(event, board, next, event.blocking.length ? "review's only blockers are about CI" : "review has no blockers");
 			} else if (event.decision === "needs_action") {
 				// Every approval reaches Concierge, including those with no feedback (Ignacio, 2026-10-30).
 				if (event.kind === "approved") {
