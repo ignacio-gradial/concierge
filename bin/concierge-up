@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Starts Concierge Bot in the current herdr session: a "Concierge Bot" workspace
-# running Opus 5.5 in ~/concierge, then asks it to start the loop.
+# Starts Concierge Bot in the current herdr session: a "Concierge Bot" workspace with Opus 5.5 in ~/concierge, and tabs
+# for the loop, the Ready list and the Merge Queue agent.
 set -euo pipefail
 test "${HERDR_ENV:-}" = 1 || { echo "concierge-up: run this from a pane inside today's herdr session" >&2; exit 1; }
 existing=$(herdr workspace list | jq -r '.result.workspaces[] | select(.label == "Concierge Bot") | .workspace_id')
@@ -9,7 +9,10 @@ herdr server reload-config >/dev/null
 pane=$(herdr workspace create --cwd "$HOME/concierge" --label "Concierge Bot" --no-focus | jq -r .result.root_pane.pane_id)
 sleep 2
 herdr agent start concierge --kind claude --pane "$pane" --timeout 60000 -- --model claude-opus-5-5 --name "Concierge Bot" >/dev/null
-herdr agent prompt concierge "Start the concierge loop." >/dev/null
+# The loop runs in its own tab so it outlives the Opus session; see the concierge-loop skill.
+loop=$(herdr tab create --workspace "${pane%%:*}" --cwd "$HOME/concierge" --label Loop --no-focus | jq -r .result.root_pane.pane_id)
+sleep 2
+herdr pane run "$loop" "$HOME/concierge/bin/concierge-loop"
 ready=$(herdr tab create --workspace "${pane%%:*}" --cwd "$HOME/concierge" --label Ready --no-focus | jq -r .result.root_pane.pane_id)
 sleep 2
 herdr pane run "$ready" "$HOME/concierge/bin/concierge-ready-view"

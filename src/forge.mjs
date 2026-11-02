@@ -24,8 +24,8 @@ const MERGE_GROUP_TTL_MS = 2 * 24 * 60 * 60 * 1000;
 const MERGE_QUEUE_FILE = path.join(os.homedir(), "concierge/state/merge-queue.json");
 
 async function gx(args) {
-	// This process's node runs the CLI, and goes first on PATH for anything it spawns: in the Monitor shell PATH can
-	// resolve proto's shim, which printed a notice to stdout (2026-10-20), and the CLI's stdout is parsed line by line.
+	// This process's node runs the CLI, and goes first on PATH for anything it spawns: in a shell PATH can resolve
+	// proto's shim, which printed a notice to stdout (2026-10-20), and the CLI's stdout is parsed line by line.
 	const env = { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` };
 	try {
 		const { stdout } = await run(process.execPath, [CLI, "forge", ...args], { cwd: REPO, env, timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });

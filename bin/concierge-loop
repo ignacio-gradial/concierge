@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
-# Runs a Concierge tick every 2.5 minutes. Meant to be the Opus session's Monitor command.
+# Runs a Concierge tick every 2.5 minutes, in the Concierge Bot "Loop" tab that bin/concierge-up opens.
 set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-# Absolute path: in the Monitor shell `node` can resolve to proto's shim (`proto run node`), and proto 0.58.1
-# printed an NDJSON "AI agent environment" notice to stdout, which became a Monitor event (2026-10-20).
+# Two loops would both write state/state.json. A stale pid doesn't count: it must still be this script.
+lock="$here/state/loop.pid"
+if [ -f "$lock" ]; then
+	held=$(cat "$lock")
+	if ps -p "$held" -o command= 2>/dev/null | grep -q concierge-loop; then
+		echo "concierge-loop already runs as pid $held" >&2
+		exit 1
+	fi
+fi
+echo $$ >"$lock"
+# Absolute path: in a shell `node` can resolve to proto's shim (`proto run node`), and proto 0.58.1 printed an NDJSON
+# "AI agent environment" notice to stdout (2026-10-20).
 node="$HOME/.proto/bin/node"
 while true; do
-	"$node" "$here/src/tick.mjs" || echo "ERROR tick.mjs exited $? — see ~/concierge/state/loop.err"
+	# A tick that crashes never reaches its own alerting. The next tick delivers this.
+	"$node" "$here/src/tick.mjs"
+	code=$?
+	if [ "$code" -ne 0 ]; then
+		printf 'ERROR tick.mjs exited %s, see ~/concierge/state/loop.err\n' "$code" >>"$here/state/outbox.txt"
+		herdr notification show "Concierge error" --body "tick.mjs exited $code, see state/loop.err" --sound request >/dev/null
+	fi
 	sleep 150
 done 2>>"$here/state/loop.err"

@@ -1,7 +1,7 @@
 {
 	"enabledMcpjsonServers": ["github"],
 	"permissions": {
-		"allow": ["Bash(/Users/iguridi/concierge/bin/concierge-loop)", "mcp__github"]
+		"allow": ["mcp__github"]
 	},
 	"hooks": {
 		"UserPromptSubmit": [

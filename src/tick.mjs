@@ -2,8 +2,8 @@
 // the cursor, Haiku triages it (reading a finished review through the GitHub
 // MCP), and the runner dedups by event key, queues and logs every event, and
 // raises the herdr notification + ✗ for needs_attention.
-// stdout carries only EVENT / ACTION / REPORT / ERROR / RECOVERED messages (src/monitor-lines.mjs): the Opus
-// loop's Monitor turns each into a message.
+// It runs from bin/concierge-loop in its own tab, outside the Opus session. EVENT / ACTION / REPORT / ERROR / RECOVERED
+// messages (src/messages.mjs) go through src/outbox.mjs, which wakes that session with them.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,7 +25,8 @@ import { fileReport, retriggerReview, review } from "./act.mjs";
 import { reviewFileEvents } from "./review-files.mjs";
 import { sendPrompt } from "./handoff.mjs";
 import { haiku } from "./haiku.mjs";
-import { eventMessage, message } from "./monitor-lines.mjs";
+import { eventMessage, message } from "./messages.mjs";
+import { deliver, post } from "./outbox.mjs";
 
 const HOME = path.join(os.homedir(), "concierge");
 const QUEUE_FILE = path.join(HOME, "state/events.jsonl");
@@ -39,7 +40,6 @@ const SEEN_LIMIT = 1000;
 const REPORTS_FILE = path.join(HOME, "state/reports.jsonl");
 const REPORTS_OFFSET = path.join(HOME, "state/reports.offset");
 
-const emit = (text) => process.stdout.write(text);
 // Kinds whose `commit` is the reviewed head, which `concierge-act handoff --event` hands to the PR's agent.
 const REVIEWED = new Set(["review_finished", "review_failed", "approved", "teammate_review"]);
 
@@ -49,10 +49,9 @@ async function triage(activity) {
 		`Run one Concierge tick on this Forge activity:\n${JSON.stringify(activity)}\n\nAreas already on the Ready list: ${areas.length ? areas.join("; ") : "none"}`,
 		JSON.parse(fs.readFileSync(path.join(HOME, "src/event-schema.json"), "utf8")),
 		// The MCP's token comes from bin/concierge-github-headers, its headersHelper.
-		{ args: ["--mcp-config", path.join(HOME, ".mcp.json"), "--strict-mcp-config", "--append-system-prompt-file", SKILL_FILE, "--allowedTools=mcp__github"] },
+		{ purpose: "triage", args: ["--mcp-config", path.join(HOME, ".mcp.json"), "--strict-mcp-config", "--append-system-prompt-file", SKILL_FILE, "--allowedTools=mcp__github"] },
 	);
 	const models = Object.keys(result.modelUsage ?? {}).join("+");
-	fs.appendFileSync(path.join(HOME, "state/usage.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), session: result.session_id, cost: result.total_cost_usd, usage: result.modelUsage, speed: result.usage?.speed, tier: result.usage?.service_tier })}\n`);
 	return { events: result.structured_output.events, cost: result.total_cost_usd, turns: result.num_turns, models };
 }
 
@@ -99,7 +98,7 @@ function checkCommit(event, activity) {
 // Every action is logged; a failed one is reported, never retried, so a tick can't do it twice.
 function emitAction(action) {
 	appendLog(`action · #${action.pr} ${action.action} · ACTION sent to Concierge`);
-	emit(`ACTION ${JSON.stringify(action)}\n`);
+	post(`ACTION ${JSON.stringify(action)}\n`);
 }
 
 async function act(event, board, activity, next) {
@@ -203,15 +202,39 @@ function relayReports() {
 	const offset = Number(fs.existsSync(REPORTS_OFFSET) ? fs.readFileSync(REPORTS_OFFSET, "utf8") : 0);
 	for (const line of reports.slice(offset).split("\n").filter(Boolean)) {
 		const report = JSON.parse(line);
-		emit(message("REPORT", report.what, report.message.split("\n").filter((l) => l.trim()).map((l) => `  ${l}`)));
+		post(message("REPORT", report.what, report.message.split("\n").filter((l) => l.trim()).map((l) => `  ${l}`)));
 	}
 	fs.writeFileSync(REPORTS_OFFSET, String(reports.length));
+}
+
+// How long each step of a tick took, for the log's tick line. A failed tick names the step it died in.
+function phaseTimer() {
+	const done = [];
+	let current;
+	let since;
+	const end = () => {
+		if (current) done.push(`${current} ${((Date.now() - since) / 1000).toFixed(1)}s`);
+		current = undefined;
+	};
+	return {
+		start(name) {
+			end();
+			current = name;
+			since = Date.now();
+		},
+		current: () => current,
+		summary() {
+			end();
+			return done.join(" ");
+		},
+	};
 }
 
 async function main() {
 	herdrWorkspace();
 	relayReports();
 	const started = new Date();
+	const phases = phaseTimer();
 	const state = readJson(STATE_FILE, undefined);
 	if (!state) {
 		// First run: start the cursor now so history does not flood the queue.
@@ -225,17 +248,22 @@ async function main() {
 		// The first Forge tick resumes from the GitHub-search cursor (an ISO time) instead of a Forge cursor.
 		const resumed = fs.existsSync(FORGE_CURSOR);
 		if (resumed) fs.copyFileSync(FORGE_CURSOR, FORGE_CURSOR_NEXT);
+		phases.start("feed");
 		const feed = await forgeEvents(FORGE_CURSOR_NEXT, resumed ? undefined : state.cursor);
 		// After the feed, so the board is at least as new as the events.
+		phases.start("board");
 		const board = await forgeBoard();
 		const groups = trackMergeGroups(feed, board);
 		const activity = myActivity(feed, board);
 		const mergeQueue = trackMergeQueue(board, activity, groups);
+		phases.start("triage");
 		const { events, cost, turns, models } = activity.length ? await triage(activity) : { events: [], cost: 0, turns: 0, models: "no triage" };
 		const seen = new Set(state.seen);
+		phases.start("files");
 		const reviewFiles = await reviewFileEvents(state.reviewsSince);
 		const fresh = [...events, ...reviewRequestsForMe(feed, board), ...reviewFiles.events].filter((e) => !seen.has(e.key));
 		const next = { ...state, cursor: started.toISOString(), failing: undefined, reviewsSince: reviewFiles.cursor };
+		phases.start("handle");
 		// Before any notification: if this fails, the next tick retries these events without re-notifying.
 		await updateReady(fresh, board, activity);
 		for (const event of fresh) {
@@ -246,7 +274,7 @@ async function main() {
 				const sound = event.blocking.length || event.feedback.length ? "request" : "done";
 				await notify(notificationTitle(event), notificationBody(event), sound);
 				next.lastAttentionAt = new Date().toISOString();
-				emit(eventMessage(event));
+				post(eventMessage(event));
 				if (event.kind === "review_failed") await retrigger(event);
 				// Someone asked Ignacio by name: a review agent starts in the Reviews workspace and approves when it finds no
 				// blocking items (Ignacio, 2026-10-30).
@@ -256,7 +284,7 @@ async function main() {
 				// Every approval reaches Concierge, including those with no feedback (Ignacio, 2026-10-30).
 				if (event.kind === "approved") {
 					await notify(notificationTitle(event), notificationBody(event), "done");
-					emit(eventMessage(event));
+					post(eventMessage(event));
 				}
 				await act(event, board, activity, next);
 			}
@@ -265,24 +293,29 @@ async function main() {
 		next.seen = [...state.seen, ...fresh.map((e) => e.key)].slice(-SEEN_LIMIT);
 		if (state.failing) {
 			appendLog("recovered · tick succeeded again");
-			emit(message("RECOVERED", "tick succeeded again"));
+			post(message("RECOVERED", "tick succeeded again"));
 		}
 		if (fs.existsSync(FORGE_CURSOR_NEXT)) fs.renameSync(FORGE_CURSOR_NEXT, FORGE_CURSOR);
 		mergeQueue.commit();
 		writeJsonAtomic(STATE_FILE, next);
-		await setAlert(alertActive(next, readJson(ACK_FILE, {})));
+		phases.start("deliver");
+		const stuck = await deliver();
+		await setAlert(alertActive(next, readJson(ACK_FILE, {})) || stuck);
 		const seconds = ((Date.now() - started.getTime()) / 1000).toFixed(1);
-		appendLog(`tick · forge ${feed.length} events, ${activity.length} PRs of mine · ${events.length} events (${fresh.length} new) · ${turns} turns · ${models} · $${cost.toFixed(4)} · ${seconds}s`);
+		appendLog(`tick · forge ${feed.length} events, ${activity.length} PRs of mine · ${events.length} events (${fresh.length} new) · ${turns} turns · ${models} · $${(cost + reviewFiles.cost).toFixed(4)} · ${phases.summary()} · ${seconds}s`);
 	} catch (error) {
 		const detail = String(error?.stderr || error?.message || error).trim().slice(0, 500);
-		appendLog(`**tick failed** · ${detail}`);
+		const failedIn = phases.current() ?? "after the tick line";
+		appendLog(`**tick failed** · in ${failedIn}, after ${phases.summary() || "nothing"} · ${detail}`);
 		// Loud once per outage; the cursor stays put so the next success covers the gap.
 		if (!state.failing) {
 			writeJsonAtomic(STATE_FILE, { ...state, failing: true, lastAttentionAt: new Date().toISOString() });
-			emit(message("ERROR", detail));
+			post(message("ERROR", detail));
 			await notify("Concierge error", detail.slice(0, 120), "request");
 			await setAlert(true);
 		}
+		// Reports and the ERROR reach the session even while ticks fail.
+		if (await deliver()) await setAlert(true);
 	}
 	await heartbeat();
 }
