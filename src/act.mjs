@@ -437,7 +437,7 @@ function reviewContextSlug(login) {
 // A readable tab name from a PR title, for reviews the tick starts on its own: the first three words after the
 // conventional-commit prefix and ticket, in Title Case ("build(deps): move pnpm overrides …" → "Move Pnpm Overrides").
 export function labelFromTitle(title) {
-	const words = title.replace(/^[a-z]+(\([^)]*\))?!?:\s*/i, "").replace(/^\[[A-Z]+-\d+\]\s*/, "").split(/\s+/).filter(Boolean).slice(0, 3);
+	const words = title.replace(/^[a-z]+(\([^)]*\))?!?:\s*/i, "").replace(/^\[[A-Z]+-\d+\]\s*/, "").split(/\s+/).map((w) => w.replace(/[,;:.]+$/, "")).filter(Boolean).slice(0, 3);
 	return words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 
