@@ -25,6 +25,10 @@ export const loopPrompt = (pending) => `${OPEN}\nOutput from the Concierge loop,
 // typed in the box in front of it (both verified 2026-10-31), so only a prompt that opens with the marker is the loop's.
 export const isLoopPrompt = (prompt) => new RegExp(`^\\s*(?:<pasted_content[^>]*>\\s*)?${OPEN}`).test(String(prompt));
 
+// The Claude agents that could be Concierge. herdr lists the Loop pane too while its tick runs `claude -p` (65 of 65
+// samples on 2026-11-02, 0 when idle), with the same workspace and cwd, so a tick leaves out its own pane.
+export const conciergeAgents = (agents, { workspace, home, ownPane }) => agents.filter((a) => a.workspace_id === workspace && a.cwd === home && a.pane_id !== ownPane);
+
 // What Ignacio has typed in the prompt box, from the ANSI of `herdr pane read --source visible --format ansi`.
 // `agent prompt` would submit that text along with the loop's (verified 2026-10-31), so delivery waits for it.
 // Claude Code's dim suggested prompt doesn't count, and `agent prompt` replaces it. null means no box is on screen, as

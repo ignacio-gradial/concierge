@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { loopPrompt, typedInBox } from "./messages.mjs";
+import { conciergeAgents, loopPrompt, typedInBox } from "./messages.mjs";
 import { appendLog, herdrWorkspace, notify } from "./signals.mjs";
 
 const run = promisify(execFile);
@@ -24,7 +24,9 @@ export function post(text) {
 // The Claude agent running in ~/concierge in this workspace. Its pane changes on restart and it may have no name.
 async function conciergeAgent() {
 	const { stdout } = await run("herdr", ["agent", "list"], { timeout: 10_000 });
-	const found = JSON.parse(stdout).result.agents.filter((a) => a.workspace_id === herdrWorkspace() && a.cwd === HOME);
+	const ownPane = process.env.HERDR_PANE_ID;
+	if (!ownPane) throw new Error("HERDR_PANE_ID unset: run the loop inside its herdr pane");
+	const found = conciergeAgents(JSON.parse(stdout).result.agents, { workspace: herdrWorkspace(), home: HOME, ownPane });
 	if (found.length !== 1) throw new Error(`${found.length} agents run in ${HOME} in this workspace, expected 1`);
 	return found[0];
 }

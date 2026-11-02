@@ -1,7 +1,7 @@
 // node --test src/messages.test.mjs. Inputs are what herdr and Claude Code produced on 2026-10-31.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isLoopPrompt, loopPrompt, message, typedInBox } from "./messages.mjs";
+import { conciergeAgents, isLoopPrompt, loopPrompt, message, typedInBox } from "./messages.mjs";
 
 test("a wrapped loop prompt is the loop's, so it leaves the ✗ up", () => {
 	assert.equal(isLoopPrompt('\n\n<pasted_content id="8643">\n<concierge-loop>\nREPORT x\n</concierge-loop>\n</pasted_content id="8643">\n'), true);
@@ -35,4 +35,16 @@ test("no box on screen is null, so delivery waits", () => {
 test("a message keeps long lines whole", () => {
 	const long = "x".repeat(2000);
 	assert.equal(message("REPORT", long, ["  body"]), `REPORT ${long}\n  body\n`);
+});
+
+test("the Loop pane isn't Concierge, though herdr lists it as an agent while its tick runs claude -p", () => {
+	// Shapes from `herdr agent list`, 2026-11-02. At 10:15 PT this pair stopped a delivery.
+	const session = { pane_id: "w58:p1", workspace_id: "w58", cwd: "/Users/iguridi/concierge", agent_status: "done" };
+	const loop = { pane_id: "w58:p9", workspace_id: "w58", cwd: "/Users/iguridi/concierge", agent_status: "unknown" };
+	const mergeQueue = { pane_id: "w58:p7", workspace_id: "w58", cwd: "/Users/iguridi/concierge-merge-queue", agent_status: "idle" };
+	const elsewhere = { pane_id: "w7G:p9", workspace_id: "w7G", cwd: "/Users/iguridi/concierge", agent_status: "idle" };
+	const where = { workspace: "w58", home: "/Users/iguridi/concierge", ownPane: "w58:p9" };
+	assert.deepEqual(conciergeAgents([session, loop, mergeQueue, elsewhere], where), [session]);
+	// With the session missing, the Loop pane must not be taken for it: the prompt would go into the loop's own pane.
+	assert.deepEqual(conciergeAgents([loop], where), []);
 });
