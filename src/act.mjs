@@ -30,6 +30,7 @@ const EVENTS_FILE = path.join(HOME, "concierge/state/events.jsonl");
 const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
 const MAX_RETRIGGERS = 2;
 const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
+const REVIEWS_DIR = path.join(HOME, "reviews");
 const IGNORED_FILE = path.join(HOME, "concierge/state/ignored.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
@@ -384,11 +385,46 @@ function endorsement(pr) {
 }
 
 // Ignacio has seen a PR and approves of its goal and approach, so a clean review may approve it.
-export function endorse(pr, { note = "", report = false } = {}) {
+export async function endorse(pr, { note = "", report = false } = {}) {
 	const all = readEndorsed();
 	all[pr] = { at: new Date().toISOString(), note };
 	fs.writeFileSync(ENDORSED_FILE, `${JSON.stringify(all, null, 1)}\n`);
-	return result(`#${pr} endorse`, `#${pr}: endorsed, so a clean review may approve it${note ? ` (${note})` : ""}.`, report);
+	const stamp = await stampCleanReview(pr);
+	return result(`#${pr} endorse`, `#${pr}: endorsed, so a clean review may approve it${note ? ` (${note})` : ""}. ${stamp}`, report);
+}
+
+// An endorsement is retroactive (Ignacio, 2026-11-02): when the PR's latest saved review ended `auto-approve: yes` on
+// what is still its head, the review agent that wrote it approves now instead of waiting for the next pass.
+async function stampCleanReview(pr) {
+	const latest = (fs.existsSync(REVIEWS_DIR) ? fs.readdirSync(REVIEWS_DIR) : [])
+		.map((file) => ({ file, match: file.match(new RegExp(`^${pr}-([0-9a-f]{8})-(\\d+)\\.md$`)) }))
+		.filter((r) => r.match)
+		.sort((a, b) => Number(a.match[2]) - Number(b.match[2]))
+		.at(-1);
+	if (!latest) return "No saved review to stamp.";
+	const sha8 = latest.match[1];
+	const decision = fs.readFileSync(path.join(REVIEWS_DIR, latest.file), "utf8").match(/auto-approve: yes|needs-ignacio:[^\n`]*|needs-context:[^\n`]*/g)?.at(-1);
+	if (decision !== "auto-approve: yes") return `Its latest review (${latest.file}) ended \`${(decision ?? "no decision line").slice(0, 100)}\`, so there is nothing to stamp.`;
+	const info = await gh(["pr", "view", String(pr), "--json", "headRefOid,state"]);
+	if (info.state !== "OPEN") return `It is ${info.state.toLowerCase()}, so there is nothing to stamp.`;
+	if (!info.headRefOid.startsWith(sha8)) return `Its latest clean review is on ${sha8}, but the head is now ${info.headRefOid.slice(0, 8)}, so the next review pass decides.`;
+	const agent = newestReviewAgent(pr, await allAgents());
+	if (!agent) return `Its latest review is clean on the current head ${sha8}, but no review agent is left to approve it: run \`concierge-act review ${pr}\`.`;
+	const prompt = [
+		`Concierge Bot: Ignacio just endorsed #${pr}: he has seen it and approves of its goal and approach. Your review ${latest.file} ended \`auto-approve: yes\` on ${sha8}, which is still the head.`,
+		`Approve it now from his account: first confirm the head is still ${sha8} (\`gh pr view ${pr} --repo gradial/v2 --json headRefOid\`); then \`gh pr review ${pr} --repo gradial/v2 --approve\` with a short body listing that review's non-blocking notes, ending with your signature (model and session ID). If the head moved, approve nothing and say so here.`,
+	].join("\n");
+	await sendPrompt({ agent: agent.pane_id, prompt, what: `#${pr} stamp`, socket: CONCIERGE_SOCKET });
+	return `Sent ${agent.name} to approve its clean review of ${sha8}.`;
+}
+
+// A PR's newest review agent still running in Concierge's session: review-<pr>, then -2, -3…
+function newestReviewAgent(pr, agents) {
+	const suffix = (n) => Number(n.match(/^review-\d+-(\d+)$/)?.[1] ?? 1);
+	return agents
+		.filter((a) => a.socket === CONCIERGE_SOCKET && new RegExp(`^review-${pr}(-\\d+)?$`).test(a.name ?? ""))
+		.sort((a, b) => suffix(a.name) - suffix(b.name))
+		.at(-1);
 }
 
 // What Concierge's review agents learned about a person, so the next review of their PRs starts from it (Ignacio,
@@ -420,11 +456,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
 	// (Ignacio, 2026-10-31). The newest one wins when several are left.
 	const agents = await allAgents();
-	const suffix = (n) => Number(n.match(/^review-\d+-(\d+)$/)?.[1] ?? 1);
-	const reused = agents
-		.filter((a) => a.socket === CONCIERGE_SOCKET && new RegExp(`^review-${pr}(-\\d+)?$`).test(a.name ?? ""))
-		.sort((a, b) => suffix(a.name) - suffix(b.name))
-		.at(-1);
+	const reused = newestReviewAgent(pr, agents);
 	let pane = reused?.pane_id;
 	let agentName = reused?.name;
 	if (!reused) {
@@ -514,7 +546,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "retrigger-review") message = await retriggerReview(Number(rest[0]), { report });
 	else if (command === "agents") message = await listAgents();
 	else if (command === "ignore") message = ignore(Number(rest[0]), { note: flag("--note") ?? "", report });
-	else if (command === "endorse") message = endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
+	else if (command === "endorse") message = await endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
