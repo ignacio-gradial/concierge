@@ -457,6 +457,9 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// (Ignacio, 2026-10-31). The newest one wins when several are left.
 	const agents = await allAgents();
 	const reused = newestReviewAgent(pr, agents);
+	// A request that lands while the PR's review agent is still working is the same pass, not a new one: on 2026-11-02
+	// Ignacio's endorsement started review-14441, and his request a minute later queued a second pass behind it.
+	if (reused?.agent_status === "working") return result(what, `#${pr} ${info.title}: ${reused.name} is still reviewing it, so no second pass was sent.`, report);
 	let pane = reused?.pane_id;
 	let agentName = reused?.name;
 	if (!reused) {
