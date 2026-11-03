@@ -31,6 +31,8 @@ const RETRIGGERS_FILE = path.join(HOME, "concierge/state/retriggers.json");
 const MAX_RETRIGGERS = 2;
 const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
 const REVIEWS_DIR = path.join(HOME, "reviews");
+// Code reviews run on omp with GPT-6 Sol at xhigh to save Claude tokens (Ignacio, 2026-11-03).
+const REVIEW_MODEL = "openai-codex/gpt-6-sol";
 const IGNORED_FILE = path.join(HOME, "concierge/state/ignored.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
@@ -441,11 +443,12 @@ export function labelFromTitle(title) {
 	return words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 
-// Someone asked Ignacio by name to review their PR: a new Claude agent reviews it (a thermo-nuclear review, a review
+// Someone asked Ignacio by name to review their PR: a new omp agent on GPT-6 Sol reviews it, to save Claude tokens
+// (Ignacio, 2026-11-03) (a thermo-nuclear review, a review
 // guide in the repo that agents find, only with --thermo-nuclear) and approves it from Ignacio's account when it finds no blocking items (Ignacio,
 // 2026-10-30). With blocking items it posts nothing and waits for him in its tab. It goes in a new tab of the
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
-export async function review(pr, { label, effort = "high", thermoNuclear = false, commentOnBlockers = false, report = false } = {}) {
+export async function review(pr, { label, effort = "xhigh", thermoNuclear = false, commentOnBlockers = false, report = false } = {}) {
 	const what = `#${pr} review`;
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state,reviews"]);
 	if (readJsonFile(IGNORED_FILE)[pr]) return result(what, `#${pr}: Ignacio is ignoring this PR, so no review started.`, report);
@@ -456,7 +459,8 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
 	// (Ignacio, 2026-10-31). The newest one wins when several are left.
 	const agents = await allAgents();
-	const reused = newestReviewAgent(pr, agents);
+	// Only omp review agents are reused: a pass sent to an older Claude review agent would spend Claude tokens.
+	const reused = newestReviewAgent(pr, agents.filter((a) => a.agent === "omp"));
 	// A request that lands while the PR's review agent is still working is the same pass, not a new one: on 2026-11-02
 	// Ignacio's endorsement started review-14441, and his request a minute later queued a second pass behind it.
 	if (reused?.agent_status === "working") return result(what, `#${pr} ${info.title}: ${reused.name} is still reviewing it, so no second pass was sent.`, report);
@@ -473,7 +477,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		const taken = new Set(agents.map((a) => a.name).filter(Boolean));
 		agentName = `review-${pr}`;
 		for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
-		await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--effort", effort], 90_000);
+		await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "omp", "--pane", pane, "--timeout", "60000", "--", "--model", REVIEW_MODEL, "--thinking", effort], 90_000);
 	}
 	// Approving or commenting on GitHub needs Ignacio's own endorsement of the PR's goal and approach (`concierge-act
 	// endorse`, 2026-10-31). Without it the agent posts nothing, unless he asks for comments (--comment-on-blockers).
@@ -489,7 +493,7 @@ export async function review(pr, { label, effort = "high", thermoNuclear = false
 		`"${info.title}" by ${info.author.login} (+${info.additions}/-${info.deletions}, branch ${info.headRefName}, head ${info.headRefOid.slice(0, 8)}${info.isDraft ? ", draft" : ""}). Ignacio was asked by name to review it, and asked Concierge Bot to send it to you.`,
 		`- First list ~/obsidian/memory/*-review-context-${slug}-*.md: one file per project of ${personName(info.author.login)}'s, named with two words for the project (such as better-auth or scim-tenants). Read the one for this PR's project, if any, and any others that touch the same code: what earlier reviews learned (areas, recurring issues, decisions Ignacio made). Use it, but verify against the code.`,
 		"- Review the whole PR in a temporary worktree or checkout, against current main source, not docs. ~/v2.main stays on main.",
-		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global CLAUDE.md (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
+		`- Save the full review to ~/reviews/${pr}-<8-char head sha>-<unix time>.md per Ignacio's global instructions (all feedback, review time, prompt, model, effort, harness, duration, branch).`,
 		"- End the saved review and your reply with one decision line: `auto-approve: yes` when there are no blocking items and nothing surprises you, `needs-ignacio: <why>` for a change in user-facing behavior, policy or security posture or anything you aren't confident about, or `needs-context: <question>` when it depends on a decision, ticket or conversation you can't see.",
 		endorsedBy
 			? `- Ignacio has seen this PR and approved of its goal and approach (${endorsedBy}). With \`auto-approve: yes\`, approve it from his account with \`gh pr review ${pr} --repo gradial/v2 --approve\` and a short body listing any non-blocking notes, ending with your signature (model and session ID). Otherwise (blocking items, \`needs-ignacio\` or \`needs-context\`), post the feedback as a review comment from his account with \`gh pr review ${pr} --repo gradial/v2 --comment\`: each blocking item or concern with file:line evidence and the fix you suggest, then the non-blocking notes, ending with your signature. Don't request changes.`
@@ -550,7 +554,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "agents") message = await listAgents();
 	else if (command === "ignore") message = ignore(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "endorse") message = await endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
-	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "high", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
+	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "xhigh", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
 		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
