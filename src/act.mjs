@@ -168,10 +168,13 @@ export async function closeWorkspace(pr, { workspace, tabs = [], report = false 
 	if (socket === CONCIERGE_SOCKET && workspaceId === CONCIERGE_WORKSPACE) return result(what, `Refused: ${label} is Concierge's own workspace.`, report);
 	const busy = members.filter((a) => !IDLE.has(a.agent_status));
 	const signed = open.filter((p) => members.some((a) => signs(a, signatures(p.body)))).map((p) => `#${p.number}`);
+	// With --tabs, an agent outside them is other work even when it is idle and signs no PR: on 2026-11-03 closing
+	// #14454's workspace also closed Ignacio's synthetic-usage-data agent in another tab.
+	const others = tabs.length ? members.filter((a) => !tabs.includes(a.tab_id)) : [];
 	let line;
 	// A workspace that still serves other work keeps running; the merged PR's own tabs, which Concierge picked, close
 	// instead when their agents are idle (Ignacio, 2026-10-30).
-	if (tabs.length && (busy.length || signed.length)) {
+	if (tabs.length && (busy.length || signed.length || others.length)) {
 		const closed = [];
 		for (const tabId of tabs) {
 			const inTab = members.filter((a) => a.tab_id === tabId);
