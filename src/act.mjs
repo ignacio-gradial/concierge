@@ -33,6 +33,8 @@ const ENDORSED_FILE = path.join(HOME, "concierge/state/endorsed.json");
 const REVIEWS_DIR = path.join(HOME, "reviews");
 // Code reviews run on omp with GPT-6 Sol at xhigh to save Claude tokens (Ignacio, 2026-11-03).
 const REVIEW_MODEL = "openai-codex/gpt-6-sol";
+// --claude runs a review on Claude instead, when Ignacio asks for one by name (2026-11-04, #14651's thermo-nuclear review).
+const CLAUDE_REVIEW_MODEL = "claude-opus-5-5";
 const IGNORED_FILE = path.join(HOME, "concierge/state/ignored.json");
 const CONCIERGE_SOCKET = process.env.HERDR_SOCKET_PATH;
 const CONCIERGE_WORKSPACE = process.env.HERDR_WORKSPACE_ID;
@@ -451,7 +453,7 @@ export function labelFromTitle(title) {
 // guide in the repo that agents find, only with --thermo-nuclear) and approves it from Ignacio's account when it finds no blocking items (Ignacio,
 // 2026-10-30). With blocking items it posts nothing and waits for him in its tab. It goes in a new tab of the
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
-export async function review(pr, { label, effort = "xhigh", thermoNuclear = false, commentOnBlockers = false, report = false } = {}) {
+export async function review(pr, { label, effort = "xhigh", thermoNuclear = false, commentOnBlockers = false, claude = false, report = false } = {}) {
 	const what = `#${pr} review`;
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state,reviews"]);
 	if (readJsonFile(IGNORED_FILE)[pr]) return result(what, `#${pr}: Ignacio is ignoring this PR, so no review started.`, report);
@@ -462,8 +464,10 @@ export async function review(pr, { label, effort = "xhigh", thermoNuclear = fals
 	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
 	// (Ignacio, 2026-10-31). The newest one wins when several are left.
 	const agents = await allAgents();
-	// Only omp review agents are reused: a pass sent to an older Claude review agent would spend Claude tokens.
-	const reused = newestReviewAgent(pr, agents.filter((a) => a.agent === "omp"));
+	// Only omp review agents are reused: a pass sent to an older Claude review agent would spend Claude tokens. With
+	// --claude only Claude ones are.
+	const kind = claude ? "claude" : "omp";
+	const reused = newestReviewAgent(pr, agents.filter((a) => a.agent === kind));
 	// A request that lands while the PR's review agent is still working is the same pass, not a new one: on 2026-11-02
 	// Ignacio's endorsement started review-14441, and his request a minute later queued a second pass behind it.
 	if (reused?.agent_status === "working") return result(what, `#${pr} ${info.title}: ${reused.name} is still reviewing it, so no second pass was sent.`, report);
@@ -480,7 +484,8 @@ export async function review(pr, { label, effort = "xhigh", thermoNuclear = fals
 		const taken = new Set(agents.map((a) => a.name).filter(Boolean));
 		agentName = `review-${pr}`;
 		for (let n = 2; taken.has(agentName); n += 1) agentName = `review-${pr}-${n}`;
-		await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", "omp", "--pane", pane, "--timeout", "60000", "--", "--model", REVIEW_MODEL, "--thinking", effort], 90_000);
+		const args = claude ? ["--model", CLAUDE_REVIEW_MODEL, "--effort", effort] : ["--model", REVIEW_MODEL, "--thinking", effort];
+		await herdr(CONCIERGE_SOCKET, ["agent", "start", agentName, "--kind", kind, "--pane", pane, "--timeout", "60000", "--", ...args], 90_000);
 	}
 	// Approving or commenting on GitHub needs Ignacio's own endorsement of the PR's goal and approach (`concierge-act
 	// endorse`, 2026-10-31). Without it the agent posts nothing, unless he asks for comments (--comment-on-blockers).
@@ -514,7 +519,7 @@ export async function review(pr, { label, effort = "xhigh", thermoNuclear = fals
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 		return send();
 	});
-	return result(what, `#${pr} ${info.title}: ${reused ? `reused ${agentName}, which reviewed it before` : `started ${agentName}`} (${thermoNuclear ? "thermo-nuclear" : "regular"} review, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
+	return result(what, `#${pr} ${info.title}: ${reused ? `reused ${agentName}, which reviewed it before` : `started ${agentName}`} (${thermoNuclear ? "thermo-nuclear" : "regular"} review on ${claude ? "Claude" : "omp"}, effort ${effort}; ${endorsedBy ? "endorsed: approves when clean, comments otherwise" : `not endorsed: never approves, ${commentOnBlockers ? "comments on blockers" : "waits for Ignacio"}`}). ${line.replace(/^handoff · /, "")}`, report);
 }
 
 // Concierge's own tabs (tab 1, Ready, Merge Queue) never close.
@@ -557,7 +562,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "agents") message = await listAgents();
 	else if (command === "ignore") message = ignore(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "endorse") message = await endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
-	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "xhigh", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), report });
+	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "xhigh", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), claude: has("--claude"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
 		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
