@@ -453,12 +453,17 @@ export function labelFromTitle(title) {
 // guide in the repo that agents find, only with --thermo-nuclear) and approves it from Ignacio's account when it finds no blocking items (Ignacio,
 // 2026-10-30). With blocking items it posts nothing and waits for him in its tab. It goes in a new tab of the
 // "Reviews" workspace when that exists in Concierge's session, otherwise in a new workspace named --label.
-export async function review(pr, { label, effort = "xhigh", thermoNuclear = false, commentOnBlockers = false, claude = false, report = false } = {}) {
+export async function review(pr, { label, effort = "xhigh", thermoNuclear = false, commentOnBlockers = false, claude = false, force = false, report = false } = {}) {
 	const what = `#${pr} review`;
 	const info = await gh(["pr", "view", String(pr), "--json", "number,title,url,author,headRefName,headRefOid,isDraft,additions,deletions,state,reviews"]);
 	if (readJsonFile(IGNORED_FILE)[pr]) return result(what, `#${pr}: Ignacio is ignoring this PR, so no review started.`, report);
 	// A request can outlive its PR: #14073 had merged by the time Concierge offered it (2026-10-30).
 	if (info.state !== "OPEN") return result(what, `#${pr} ${info.title}: ${info.state.toLowerCase()}, so no review started.`, report);
+	// A repeat request on a head that already has a saved review starts nothing: on 2026-11-04 Michael re-requested
+	// #14651 and #14626 on reviewed heads while waiting on Ignacio's decisions (Ignacio, 2026-11-04). --force reviews anyway.
+	const head8 = info.headRefOid.slice(0, 8);
+	const covered = !force && fs.existsSync(REVIEWS_DIR) && fs.readdirSync(REVIEWS_DIR).find((f) => f.startsWith(`${pr}-${head8}-`));
+	if (covered) return result(what, `#${pr} ${info.title}: ${covered} already reviews head ${head8}, so no new pass was sent.`, report);
 	// The author first, so Ignacio finds a review tab by who asked (2026-10-30): "hyperb1iss · Client Address".
 	const name = `${personName(info.author.login)} · ${label ?? labelFromTitle(info.title)}`;
 	// A PR's next pass goes to its review agent that is still running, which keeps the earlier passes in context
@@ -562,7 +567,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	else if (command === "agents") message = await listAgents();
 	else if (command === "ignore") message = ignore(Number(rest[0]), { note: flag("--note") ?? "", report });
 	else if (command === "endorse") message = await endorse(Number(rest[0]), { note: flag("--note") ?? "", report });
-	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "xhigh", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), claude: has("--claude"), report });
+	else if (command === "review") message = await review(Number(rest[0]), { label, effort: flag("--effort") ?? "xhigh", commentOnBlockers: has("--comment-on-blockers"), thermoNuclear: has("--thermo-nuclear"), claude: has("--claude"), force: has("--force"), report });
 	else if (command === "handoff") {
 		const [pr, kind, typed] = rest;
 		if (!pr || !kind || !(event || file)) throw new Error("usage: concierge-act handoff <pr> address|discuss [<reviewed-sha>] (--event <key> [--non-blocking] | --file <path>)");
