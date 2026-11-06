@@ -19,9 +19,9 @@ import {
 	STATE_FILE,
 	writeJsonAtomic,
 } from "./signals.mjs";
-import { forgeBoard, forgeEvents, myActivity, reviewRequestsForMe, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
+import { forgeBoard, forgeEvents, myActivity, reviewRequestsForMe, stagingCuts, trackMergeGroups, trackMergeQueue } from "./forge.mjs";
 import { READY_FILE, updateReady } from "./ready.mjs";
-import { fileReport, retriggerReview, review } from "./act.mjs";
+import { fileReport, retriggerReview, review, validateStaging } from "./act.mjs";
 import { reviewFileEvents } from "./review-files.mjs";
 import { sendPrompt } from "./handoff.mjs";
 import { haiku } from "./haiku.mjs";
@@ -290,6 +290,18 @@ async function main() {
 			}
 		}
 		await watchCi(board, next);
+		for (const cut of stagingCuts(feed, board, next.stagingSent)) {
+			const prs = cut.prs.map((p) => `#${p.pullRequest}`).join(", ");
+			// Marked before starting, so a failed start is reported once and not retried by every tick.
+			next.stagingSent = { ...next.stagingSent, ...Object.fromEntries(cut.prs.map((p) => [p.pullRequest, p.mergeSha])) };
+			appendLog(`action · ${cut.rc} staging_ready · validating ${prs}`);
+			await notify(`Staging ${cut.rc}`, `sending an agent to validate ${prs}`, "request");
+			try {
+				await validateStaging(cut.rc, cut.prs, { report: true });
+			} catch (error) {
+				fileReport(`${cut.rc} staging validation failed`, `${cut.rc}: starting the staging validation agent for ${prs} failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 400)}`);
+			}
+		}
 		next.seen = [...state.seen, ...fresh.map((e) => e.key)].slice(-SEEN_LIMIT);
 		if (state.failing) {
 			appendLog("recovered · tick succeeded again");

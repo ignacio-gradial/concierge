@@ -12,7 +12,7 @@ const REPO = path.join(os.homedir(), "v2.main");
 // (60-105 s) after most pulls of ~/v2.main. Concierge only needs a CLI that is built, not fresh. A missing or
 // half-written bundle fails the tick loudly, and the next tick retries.
 const CLI = path.join(REPO, "apps/cli/bin/run.js");
-const FEED_TYPES = ["feed:pull_request:review", "feed:pull_request:checks_settled", "feed:pull_request:state_changed", "feed:workflow_run:completed"];
+const FEED_TYPES = ["feed:pull_request:review", "feed:pull_request:checks_settled", "feed:pull_request:state_changed", "feed:workflow_run:completed", "feed:release:staging_ready"];
 // A cancelled run was replaced by a newer push; a skipped one wrote no review.
 const NO_REVIEW = new Set(["cancelled", "skipped"]);
 // Merge-queue commits name their PR only in the branch of their workflow runs, gh-readonly-queue/<base>/pr-<N>-<sha>:
@@ -136,6 +136,9 @@ export function myActivity(events, board) {
 			case "feed:workflow_run:completed":
 				if (event.name !== "Code Review" || NO_REVIEW.has(event.conclusion)) return [];
 				return [...new Set([...(event.pullRequests ?? []), byBranch.get(event.branch)])].filter((n) => open.has(n));
+			case "feed:release:staging_ready":
+				// Not PR activity for Haiku: the runner turns it into a staging validation itself (stagingCuts).
+				return [];
 			default:
 				// The raw line says who printed it (2026-10-21: a one-off `type: message` line, source unknown).
 				throw new Error(`unexpected Forge event type ${event.type}: ${JSON.stringify(event).slice(0, 300)}`);
@@ -176,4 +179,19 @@ export function reviewRequestsForMe(events, board) {
 			ask: { area: "", line: "", size: "" },
 			commit: e.headSha ?? "",
 		}));
+}
+
+// Staging runs a new RC (Argo CD Healthy and Synced on every staging cluster, once per RC) with Ignacio's PRs still
+// waiting for a sign-off (Ignacio, 2026-11-05). A PR already sent at the same merge commit isn't sent again when a
+// later RC lists it: rc.2 and rc.3 re-list the PRs rc.1 had. ENG-6315 PRs stay with Ignacio and the AuthZ agent.
+export function stagingCuts(events, board, sent = {}) {
+	const me = board.viewer.login;
+	return events
+		.filter((e) => e.type === "feed:release:staging_ready")
+		.map((e) => ({
+			rc: e.rcVersion,
+			readyAt: e.readyAt,
+			prs: (e.pullRequests ?? []).filter((p) => p.authorLogin === me && p.status === "waiting" && !/ENG-6315/i.test(p.title ?? "") && sent[p.pullRequest] !== p.mergeSha),
+		}))
+		.filter((cut) => cut.prs.length);
 }

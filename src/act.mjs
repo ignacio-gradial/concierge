@@ -225,6 +225,29 @@ export async function ciGreen(pr, { ci = null, workspace, label, report = false 
 	return result(what, `#${pr} ${info.title}: started CI agent ${name}. ${line.replace(/^handoff · /, "")}`, report);
 }
 
+// Forge says staging runs a new RC (`feed:release:staging_ready`) with Ignacio's PRs still waiting for a sign-off: a new
+// Claude agent in a new workspace validates them on staging per his methodology doc and posts the evidence on each PR
+// (Ignacio, 2026-11-05). It never signs off or promotes: those stay his call.
+const STAGING_DOC = "~/obsidian/memory/2026-10-13-staging-validation-methodology.md";
+export async function validateStaging(rc, prs, { report = false } = {}) {
+	const what = `${rc} staging validation`;
+	const pane = (await herdr(CONCIERGE_SOCKET, ["workspace", "create", "--cwd", REPO, "--label", `Staging ${rc}`, "--no-focus"])).root_pane.pane_id;
+	await new Promise((resolve) => setTimeout(resolve, 2_000));
+	const name = `staging-${rc.replace(/[^0-9a-z]+/gi, "-")}`;
+	await herdr(CONCIERGE_SOCKET, ["agent", "start", name, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", "--model", "claude-opus-5-5", "--effort", "high"], 90_000);
+	const prompt = [
+		`Staging runs release candidate ${rc}: Forge's staging_ready event says Argo CD rolled it out Healthy and Synced on every staging cluster. Validate Ignacio's PRs in it that still wait for a staging sign-off, on AWS staging (eks-us-west-2-stage-v2). Concierge Bot started you automatically on Ignacio's standing request (2026-11-05).`,
+		prs.map((p) => `- #${p.pullRequest} ${p.title} (${p.url}), merge ${String(p.mergeSha).slice(0, 8)}`).join("\n"),
+		`Read ${STAGING_DOC} first: access, surfaces, fixtures, evidence and cleanup. It is a map from earlier runs; verify against current source and the live cluster before relying on it. Search memory (memory-search) for anything specific to each PR.`,
+		"For each PR: read its diff and description, confirm the change is live with `./gx forge reach <PR> --json` (stop and report if the running cut lacks it), then run smoke tests that exercise the paths it touches, against the production path rather than a toy. Use only the test orgs the doc names, with disposable actors and fixtures, and clean them up.",
+		"Then add a PR comment on each PR with what was tested and how: revision, org, actor, actions, responses, before/after rows, logs, cleanup and untested paths, ending with your signature (model and session ID). Keep screenshots out of the repo; upload them with scripts/upload-github-image.ts.",
+		"Production stays untouched. Never sign off (`gx forge release signoff`) or promote the RC: report the proof URL and the exact sign-off command for each PR, and Ignacio decides. Don't push to any PR branch. If a PR fails validation, stop on that PR and report the evidence.",
+		"Reply here with one line per PR: validated / failed / blocked, the evidence comment URL, and anything untested.",
+	].join("\n\n");
+	const line = await sendPrompt({ agent: pane, prompt, what, socket: CONCIERGE_SOCKET });
+	return result(what, `${rc}: started ${name} to validate ${prs.map((p) => `#${p.pullRequest}`).join(", ")} on staging. ${line.replace(/^handoff · /, "")}`, report);
+}
+
 // The items and the reviewed commit of the event with `key` in the queue.
 function fromEvent(key, nonBlocking) {
 	const line = fs.readFileSync(EVENTS_FILE, "utf8").split("\n").filter((l) => l.includes(`"key":"${key}"`)).at(-1);
