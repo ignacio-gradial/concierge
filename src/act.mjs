@@ -407,11 +407,16 @@ function readEndorsed() {
 	}
 }
 
+// Ignacio endorses every CI PR from these authors in advance (David's, 2026-11-06): a `ci:` or `ci(scope):` title.
+const STANDING_CI_ENDORSEMENTS = ["david-piholyuk"];
+
 // Why Ignacio counts as having seen the PR's goal and approach, or null. Only his own endorsement counts (2026-10-31):
 // an earlier approval from his account may have been an agent's, such as #14319's and #14220's.
-function endorsement(pr) {
+function endorsement(pr, info) {
 	const given = readEndorsed()[pr];
-	return given ? `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}` : null;
+	if (given) return `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}`;
+	if (STANDING_CI_ENDORSEMENTS.includes(info.author.login) && /^ci(\(|:)/.test(info.title)) return `standing endorsement of ${info.author.login}'s CI PRs, given to Concierge 2026-11-06`;
+	return null;
 }
 
 // Ignacio has seen a PR and approves of its goal and approach, so a clean review may approve it.
@@ -517,7 +522,7 @@ export async function review(pr, { label, effort = "xhigh", thermoNuclear = fals
 	}
 	// Approving or commenting on GitHub needs Ignacio's own endorsement of the PR's goal and approach (`concierge-act
 	// endorse`, 2026-10-31). Without it the agent posts nothing, unless he asks for comments (--comment-on-blockers).
-	const endorsedBy = endorsement(pr);
+	const endorsedBy = endorsement(pr, info);
 	const slug = reviewContextSlug(info.author.login);
 	const contextFile = `~/obsidian/memory/<date>-review-context-${slug}-<project>.md`;
 	const prompt = [
