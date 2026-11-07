@@ -407,7 +407,8 @@ function readEndorsed() {
 	}
 }
 
-// Ignacio endorses every CI PR from these authors in advance (David's, 2026-11-06): a `ci:` or `ci(scope):` title.
+// Ignacio endorses every CI PR from these authors in advance (David's, 2026-11-06): a `ci:`, `ci(scope):` or `type(ci):`
+// title, such as `perf(ci):` or `fix(ci):`.
 const STANDING_CI_ENDORSEMENTS = ["david-piholyuk"];
 
 // Why Ignacio counts as having seen the PR's goal and approach, or null. Only his own endorsement counts (2026-10-31):
@@ -415,7 +416,7 @@ const STANDING_CI_ENDORSEMENTS = ["david-piholyuk"];
 function endorsement(pr, info) {
 	const given = readEndorsed()[pr];
 	if (given) return `endorsed to Concierge ${given.at}${given.note ? `: ${given.note}` : ""}`;
-	if (STANDING_CI_ENDORSEMENTS.includes(info.author.login) && /^ci(\(|:)/.test(info.title)) return `standing endorsement of ${info.author.login}'s CI PRs, given to Concierge 2026-11-06`;
+	if (STANDING_CI_ENDORSEMENTS.includes(info.author.login) && /^(ci(\([^)]*\))?|\w+\(ci\)):/.test(info.title)) return `standing endorsement of ${info.author.login}'s CI PRs, given to Concierge 2026-11-06`;
 	return null;
 }
 
